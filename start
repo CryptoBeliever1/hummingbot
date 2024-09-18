@@ -1,7 +1,7 @@
 #!/bin/bash
 
-PASSWORD=""
-FILENAME=""
+PASSWORD="3lB52NtcnIFnszU7e"
+FILENAME="cross_mm_custom.py"
 CONFIG=""
 
 # Argument parsing
