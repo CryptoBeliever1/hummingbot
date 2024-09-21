@@ -477,7 +477,7 @@ class KrakenV2Exchange(ExchangePyBase):
             # self.logger().info(f"complex_event_message: {complex_event_message}, type: {type(complex_event_message)}")
             # for balance updates there may be several objects in a single response
 
-            # self.logger().info(f"event_message: {event_message}, type: {type(event_message)}")
+            # self.logger().info(f"Got event_message: {event_message}")
 
             try:
                 channel: str = event_message.get("channel", None)          
@@ -489,14 +489,18 @@ class KrakenV2Exchange(ExchangePyBase):
                     # two of user_orders_trades_channels are equal to 'executions'
                     if channel in user_orders_trades_channels:                    
                         trade_message = []
-                        order_message = []                    
-                        
+                        order_message = []                                           
+
                         for item in data:
-                            if "exec_id" in item:
-                                trade_message.append(item)
-                            else:
+
+                            # self.logger().info(f"Received a data Message from channel {channel}: {item}")
+                            if "exec_type" in item:
+                                if item["exec_type"] in ["filled", "trade"]:
+                                    trade_message.append(item)
+
                                 order_message.append(item)                                   
-                                        
+
+                        # trade or order message can have multiple records                
                         if trade_message:
                             self._process_trade_message(trade_message)
                         if order_message:
@@ -517,6 +521,7 @@ class KrakenV2Exchange(ExchangePyBase):
 
     def _process_balance_message_ws(self, event_message):
         
+        self.logger().info(f"Got new Balance message: {event_message}")
         event_message_type = event_message.get("type", None)        
         # for simplicity we process only "main" "spot" balances
         account = event_message.get("data", [])
@@ -568,6 +573,8 @@ class KrakenV2Exchange(ExchangePyBase):
             new_balance = Decimal(str(wallet["balance"]))
             self._account_balances[asset_name] = new_balance
 
+            self.logger().info(f"{asset_name} total balance updated. New: {new_balance}, Old: {previous_balance}")
+
             # The available balance is approximate and is not always correct.
             # it will work well if no other bots are running on the same assets.
             # For precise and accurate result the information about all open orders
@@ -579,6 +586,8 @@ class KrakenV2Exchange(ExchangePyBase):
             self._account_available_balances[asset_name] = (
                 previous_available_balance + (new_balance - previous_balance)
             )
+
+            self.logger().info(f"{asset_name} available balance updated: New: {new_balance}, Old: {previous_available_balance}")
 
     def _create_trade_update_with_order_fill_data(
             self,
@@ -613,38 +622,75 @@ class KrakenV2Exchange(ExchangePyBase):
             self,
             order_fill: Dict[str, Any],
             order: InFlightOrder):
-        
-        source_fee = order_fill['fees'][0]
-        
-        fee_asset = convert_from_ws_exchange_symbol(source_fee["asset"])
 
-        fee = TradeFeeBase.new_spot_fee(
-            fee_schema=self.trade_fee_schema(),
-            trade_type=order.trade_type,
-            percent_token=fee_asset,
-            flat_fees=[TokenAmount(
-                amount=Decimal(source_fee["qty"]),
-                token=fee_asset
-            )]
-        )
-        trade_update = TradeUpdate(
-            trade_id=str(order_fill["exec_id"]),
-            client_order_id=order.client_order_id,
-            exchange_order_id=order_fill.get("order_id"),
-            trading_pair=order.trading_pair,
-            fee=fee,
-            fill_base_amount=Decimal(order_fill["last_qty"]),
-            fill_quote_amount=Decimal(order_fill["last_qty"]) * Decimal(order_fill["last_price"]),
-            fill_price=Decimal(order_fill["last_price"]),
-            fill_timestamp=rfc3339_to_unix(order_fill["timestamp"]),
-        )
+        if "exec_id" in order_fill: 
+
+            source_fee = order_fill['fees'][0]
+            
+            fee_asset = convert_from_ws_exchange_symbol(source_fee["asset"])
+
+            fee = TradeFeeBase.new_spot_fee(
+                fee_schema=self.trade_fee_schema(),
+                trade_type=order.trade_type,
+                percent_token=fee_asset,
+                flat_fees=[TokenAmount(
+                    amount=Decimal(str(source_fee["qty"])),
+                    token=fee_asset
+                )]
+            )
+
+            trade_update = TradeUpdate(
+                trade_id=str(order_fill["exec_id"]),
+                client_order_id=order.client_order_id,
+                exchange_order_id=str(order_fill.get("order_id", "")),
+                trading_pair=order.trading_pair,
+                fee=fee,
+                fill_base_amount=Decimal(str(order_fill["last_qty"])),
+                fill_quote_amount=Decimal(str(order_fill["cost"])),
+                fill_price=Decimal(str(order_fill["last_price"])),
+                fill_timestamp=rfc3339_to_unix(order_fill["timestamp"]),
+            )
+        else:
+
+            source_fee = {"asset": "USD", "qty": order_fill["fee_usd_equiv"]}
+            
+            fee_asset = convert_from_ws_exchange_symbol(source_fee["asset"])
+
+            fee = TradeFeeBase.new_spot_fee(
+                fee_schema=self.trade_fee_schema(),
+                trade_type=order.trade_type,
+                percent_token=fee_asset,
+                flat_fees=[TokenAmount(
+                    amount=Decimal(source_fee["qty"]),
+                    token=fee_asset
+                )]
+            )
+
+            trade_update = TradeUpdate(
+                trade_id=str(order_fill.get("exec_id", "fully_filled")),
+                client_order_id=order.client_order_id,
+                exchange_order_id=str(order_fill.get("order_id", "")),
+                trading_pair=order.trading_pair,
+                fee=fee,
+                fill_base_amount=Decimal(str(order_fill["cum_qty"])),
+                fill_quote_amount=Decimal(str(order_fill["cum_cost"])),
+                fill_price=Decimal(str(order_fill["avg_price"])),
+                fill_timestamp=rfc3339_to_unix(order_fill["timestamp"]),
+            )                
+
+            self.logger().info(f"Created a Trade Update: fill_base_amount = {trade_update.fill_base_amount}, fill_quote_amount = {trade_update.fill_quote_amount}, fill_price = {trade_update.fill_price}")
+        rate_counter = order_fill.get("ratecount", None)
+        if rate_counter is not None:
+            self.rate_count = int(rate_counter)
+
         return trade_update
 
 
     # modified for ws v2
     def _process_trade_message(self, trades: List):
-        self.logger().info(f"Received Trade Message. Orders: {trades}")
+        
         for update in trades:
+            self.logger().info(f"Received a Trade Message. Order or Trade: {update}")
             # trade_id: str = next(iter(update))
             trade: Dict[str, str] = update
             # trade["trade_id"] = update["exec_id"]
@@ -682,16 +728,16 @@ class KrakenV2Exchange(ExchangePyBase):
 
     def _process_order_message(self, orders: List):
         # update = orders[0]
-        self.logger().info(f"Received Order Message. Orders: {orders}")
+        # self.logger().info(f"Received Order Message. Orders: {orders}")
         for order_msg in orders:
-            # self.logger().info(f"order_msg {order_msg}")
+            self.logger().info(f"Received Order Message. Order: {order_msg}")
             client_order_id = str(order_msg.get("order_userref", ""))
             tracked_order = self._order_tracker.all_updatable_orders.get(client_order_id)
             
             if not tracked_order:
                 self.logger().debug(
                     f"Ignoring order message with client id {client_order_id}: not in in_flight_orders.")
-                return
+                continue
             if "order_status" in order_msg:
                 order_update = self._create_ws_order_update_with_order_status_data(order_status=order_msg,
                                                                                 order=tracked_order)

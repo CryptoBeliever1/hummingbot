@@ -31,7 +31,7 @@ class CrossMmCustom(ScriptStrategyBase):
 
 ### OPTIONS ###
     # both, buy, sell
-    flow_mode = "both" #"sell" #"both"
+    flow_mode = "buy" #"sell" #"both"
 
     maker = 'kraken_v2' # 'kraken_paper_trade'
     taker = 'mexc'  #'gate_io_paper_trade'
@@ -49,25 +49,25 @@ class CrossMmCustom(ScriptStrategyBase):
     #in milliseconds, delay after which to check for unprocessed maker orders
     trade_timestamp_delay = 10
 
-    maker_fee = 0.002
-    taker_fee = 0.001 #0.001 #0.00084
+    maker_fee = 0.0025
+    taker_fee = 0.0002 #0.001 #0.00084
 
-    # profit in fractions, 0.001 = 0.1%
+    ###### PROFIT in fractions, 0.001 = 0.1% #######
     # maker fee can be added here
-    min_profit_sell = 0.1 #0.0005
-    min_profit_buy = 0.005 #0.001 #0.00085 #was 0.0005 on 06.05.21
+    min_profit_sell = -0.02 #0.0005
+    min_profit_buy = -0.02 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
 
     ##### DUST VOLUME ##### in base asset units
-    dust_vol_sell = 20 
-    dust_vol_buy = 5
+    dust_vol_sell = 0.1 
+    dust_vol_buy = 0.1
     #####             ##### 
 
     # in quote currency. This setting can be used to put the order with THE SAME
     # PRICE as the current best order. Just increase the accuracy by 10 times
     # compared to the max accuracy of the base asset on maker exchange
     # For example, if min step is 1e-8, put 1e-9
-    order_price_step_sell = 0.03 #9.8e-9 #1e-9
-    order_price_step_buy = 0.1
+    order_price_step_sell = 0.2 #9.8e-9 #1e-9
+    order_price_step_buy = 0.2
 
     # this is the max allowed distance up from the dust price
     # if the order price stays within the distance, it's not edited
@@ -87,7 +87,7 @@ class CrossMmCustom(ScriptStrategyBase):
 
     # if the hedge price is out of the volume window, the order price will
     # be kept within this distance from the hedge price
-    hedge_price_safe_distance_sell = 0.05
+    hedge_price_safe_distance_sell = 1
     hedge_price_safe_distance_buy = 1
 
     maker_order_book_depth = 30
@@ -108,8 +108,8 @@ class CrossMmCustom(ScriptStrategyBase):
     amount_buy = 0.1 #0.00026 #0.00028  # 0.00105 #Base asset
 
     #minimal order amount nominated in quote asset
-    min_notional_maker = 10
-    min_notional_taker = 10
+    min_notional_maker = 5
+    min_notional_taker = 5
 
     #Adaptive order size mode. If enabled, the order amount depends on the wallet available aseets
     advaptive_order_amount_mode = 1 # 1 - enabled, 0 - disabled
@@ -157,8 +157,8 @@ class CrossMmCustom(ScriptStrategyBase):
     # It's important to keep 1.01*max_order_size on taker if the MARKET BUY order is 
     # not possible on taker with the amount only
     # so taker_min_balance_quote = amount_sell*price*0.01
-    taker_min_balance_quote = 2
-    maker_min_balance_quote = 2
+    taker_min_balance_quote = 0
+    maker_min_balance_quote = 0
 
     # what part of max borrowable base amount to take for limiting max order amount
     max_borrowable_initial_part = 1
@@ -217,18 +217,28 @@ class CrossMmCustom(ScriptStrategyBase):
     exit_bot_flag = False
     start_time = None
     idle_mode = False
-
+    one_time_message_flag = False
+    
     def on_tick(self):
+        
         # self.logger().info("TICK STARTED!!!!!!!!!!!!!!!!!!!!!!!!!!")             
-
+        # self.logger().info(self.connectors[self.taker].trading_rules)
         self.check_active_orders(debug_output=False) 
 
         # self.exit_after_some_time()
 
-        if self.exit_bot_flag and self.one_order_only:
-            self.custom_cancel_all_orders()            
-            self.logger().info("Stopping the bot due to One Order Only flag.")
-            raise RuntimeError("Stopping the script due to a non-critical error.") 
+        # if self.exit_bot_flag and self.one_order_only:
+        #     self.custom_cancel_all_orders()            
+        #     self.logger().info("Stopping the bot due to One Order Only flag.")
+        #     raise RuntimeError("Stopping the script due to a non-critical error.")
+        
+        if self.exit_bot_flag:
+            
+            self.custom_cancel_all_orders()
+            if not self.one_time_message_flag: 
+                self.logger().info("Skipping all on_tick routines due to One Order Only flag.")
+                self.one_time_message_flag = True
+            return         
 
         self.custom_init()
 
@@ -297,7 +307,7 @@ class CrossMmCustom(ScriptStrategyBase):
         # self.taker_base_symbol, self.taker_quote_symbol = self.taker_pair.split("-")
         
         self.maker_base_symbol, self.maker_quote_symbol = self.connectors[self.maker].split_trading_pair(self.maker_pair)
-        self.taker_base_symbol, self.taker_quote_symbol = self.connectors[self.maker].split_trading_pair(self.maker_pair)
+        self.taker_base_symbol, self.taker_quote_symbol = self.connectors[self.taker].split_trading_pair(self.taker_pair)
 
         # # Log the variables using logger().info
         # self.logger().info(f"Maker base symbol: {self.maker_base_symbol}, Maker quote symbol: {self.maker_quote_symbol}")
@@ -315,6 +325,7 @@ class CrossMmCustom(ScriptStrategyBase):
         
         self.taker_quote_free = None
         self.taker_quote_free = float(self.connectors[self.taker].get_available_balance(self.taker_quote_symbol))
+        # float(self.connectors[self.taker].get_balance(self.taker_quote_symbol)) 
 
         self.maker_base_total = None
         self.maker_base_total = float(self.connectors[self.maker].get_balance(self.maker_base_symbol))
@@ -451,6 +462,7 @@ class CrossMmCustom(ScriptStrategyBase):
 
         if debug_output:
             self.logger().info(f"sell_values: {sell_values}")
+            self.logger().info(f"taker_quote_free: {self.taker_quote_free}, taker_min_balance_quote: {self.taker_min_balance_quote}, hedge_price_sell: {self.hedge_price_sell}")
             self.logger().info(f"order_size_sell: {self.order_size_sell}")
 
         buy_values = [
@@ -873,11 +885,21 @@ class CrossMmCustom(ScriptStrategyBase):
 
         if event.trade_type == TradeType.BUY and (filled_order is not None):
             
-            self.logger().info(f"Filled maker BUY order for {event.amount} {filled_order.base_currency} with price: {event.price} {filled_order.quote_currency}")            
-            
+            self.logger().info(f"Filled MAKER BUY order {filled_order.client_order_id} for {event.amount * event.price} {filled_order.quote_currency} ({event.amount} {filled_order.base_currency} at {event.price} {filled_order.quote_currency})")            
+
+            if self.one_order_only:
+                self.logger().info("One order only! No more orders should be placed.")
+                self.exit_bot_flag = True
+
             taker_sell_result = self.taker_sell_by_volume_price
             
             sell_price_with_slippage = Decimal(taker_sell_result) * Decimal(self.taker_best_bid_price_coef)
+
+            taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
+            if taker_rules:
+                taker_price_increment = Decimal(str(taker_rules.min_price_increment))
+                if taker_price_increment:
+                    sell_price_with_slippage = Decimal(self.connectors[self.taker].quantize_order_price(self.taker_pair, sell_price_with_slippage))    
 
             taker_sell_order_amount = event.amount
 
@@ -887,23 +909,34 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.logger().info(f"Correcting SELL LIMIT amount on taker to {taker_sell_order_amount} because the quote balance on taker is not enough")
 
 
-            self.logger().info(f"Sending taker SELL order for {taker_sell_order_amount} {filled_order.base_currency} at price: {sell_price_with_slippage} {filled_order.quote_currency}")
+            self.logger().info(f"Sending TAKER SELL order for {taker_sell_order_amount} {filled_order.base_currency} at price: {sell_price_with_slippage} {filled_order.quote_currency}")
             
             sell_order = OrderCandidate(trading_pair=self.taker_pair, is_maker=False, order_type=OrderType.LIMIT, 
                                         order_side=TradeType.SELL, amount=Decimal(taker_sell_order_amount), price=sell_price_with_slippage)
             
             if self.check_order_min_size_before_placing(self.taker, sell_order, notif_output=True):
-                self.place_order(self.taker, sell_order)
-                if self.one_order_only:
-                    self.exit_bot_flag = True
+                try:
+                    self.place_order(self.taker, sell_order)
+                except Exception as e:
+                    self.logger().warning(f"An error of type {type(e).__name__} occurred while placing SELL order: {e}", exc_info=True)
         
         elif event.trade_type == TradeType.SELL and self.is_active_maker_order(event):
 
-            self.logger().info(f"Filled maker SELL order for {event.amount} {filled_order.base_currency} with price: {event.price} {filled_order.quote_currency}")
+            self.logger().info(f"Filled MAKER SELL order {filled_order.client_order_id} for {event.amount * event.price} {filled_order.quote_currency} ({event.amount} {filled_order.base_currency} at {event.price} {filled_order.quote_currency})")
+
+            if self.one_order_only:
+                self.logger().info("One order only! No more orders should be placed.")
+                self.exit_bot_flag = True
 
             taker_buy_result = self.taker_buy_by_volume_price
             
             buy_price_with_slippage = Decimal(taker_buy_result) * Decimal(self.taker_best_ask_price_coef)
+
+            taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
+            if taker_rules:
+                taker_price_increment = Decimal(str(taker_rules.min_price_increment))
+                if taker_price_increment:
+                    buy_price_with_slippage = Decimal(self.connectors[self.taker].quantize_order_price(self.taker_pair, buy_price_with_slippage) + taker_price_increment)
 
             taker_buy_order_amount = event.amount
 
@@ -916,15 +949,16 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.logger().info(f"Correcting BUY LIMIT amount on taker to {taker_buy_order_amount} because the quote balance on taker is not enough")
 
 
-            self.logger().info(f"Sending taker BUY order for {taker_buy_order_amount} {filled_order.base_currency} at price: {buy_price_with_slippage} {filled_order.quote_currency}")
+            self.logger().info(f"Sending TAKER BUY order for {taker_buy_order_amount} {filled_order.base_currency} at price: {buy_price_with_slippage} {filled_order.quote_currency}")
 
             buy_order = OrderCandidate(trading_pair=self.taker_pair, is_maker=False, order_type=OrderType.LIMIT, 
                                         order_side=TradeType.BUY, amount=Decimal(taker_buy_order_amount), price=buy_price_with_slippage)
             
-            if self.check_order_min_size_before_placing(self.taker, sell_order, notif_output=True):
-                self.place_order(self.taker, buy_order)
-                if self.one_order_only:
-                    self.exit_bot_flag = True
+            if self.check_order_min_size_before_placing(self.taker, buy_order, notif_output=True):
+                try:
+                    self.place_order(self.taker, buy_order)
+                except Exception as e:
+                    self.logger().warning(f"An error of type {type(e).__name__} occurred while placing BUY order: {e}", exc_info=True)
 
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):
@@ -1006,8 +1040,8 @@ class CrossMmCustom(ScriptStrategyBase):
         lines.extend([f"self.maker_base_free: {self.maker_base_free}"])
         lines.extend([f"self.maker_quote_free: {self.maker_quote_free}"])
         # lines.extend([f"trading_rules on maker: {self.connectors[self.maker].trading_rules.get(self.maker_pair)}"])
-        lines.extend([f"say_hello: {min_quantum_2}"])
-        # lines.extend([f"self.taker_base_free = {self.taker_base_free}, self.taker_quote_free = {self.taker_quote_free}"])
+        # lines.extend([f"say_hello: {min_quantum_2}"])
+        lines.extend([f"self.taker_base_free = {self.taker_base_free}, self.taker_quote_free = {self.taker_quote_free}"])
         maker_rules = self.connectors[self.maker].trading_rules.get(self.maker_pair)
         taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
 
@@ -1059,9 +1093,9 @@ class CrossMmCustom(ScriptStrategyBase):
         """
         market_pair = self._market_trading_pair_tuple(connector_name, trading_pair)
         if order_type in [OrderType.LIMIT, OrderType.LIMIT_MAKER]:
-            price = self.connectors[self.maker].quantize_order_price(trading_pair, price)
-        quantized_amount = self.connectors[self.maker].quantize_order_amount(trading_pair=trading_pair, amount=amount)
-        self.logger().info(f"Creating {trading_pair} buy order: price: {price} amount: {quantized_amount}.")
+            price = self.connectors[connector_name].quantize_order_price(trading_pair, price)
+        quantized_amount = self.connectors[connector_name].quantize_order_amount(trading_pair=trading_pair, amount=amount)
+        self.logger().info(f"{connector_name}: Creating {trading_pair} buy order: price: {price} amount: {quantized_amount}.")
         order_result = self.buy_with_specific_market(market_pair, amount, order_type, price, position_action=position_action)
         
         # if not self.connectors[self.maker].real_time_balance_update:
@@ -1093,8 +1127,8 @@ class CrossMmCustom(ScriptStrategyBase):
         """
         market_pair = self._market_trading_pair_tuple(connector_name, trading_pair)
         if order_type in [OrderType.LIMIT, OrderType.LIMIT_MAKER]:
-            price = self.connectors[self.maker].quantize_order_price(trading_pair, price)
-        quantized_amount = self.connectors[self.maker].quantize_order_amount(trading_pair=trading_pair, amount=amount)
-        self.logger().info(f"Creating {trading_pair} sell order: price: {price} amount: {quantized_amount}.")        
+            price = self.connectors[connector_name].quantize_order_price(trading_pair, price)
+        quantized_amount = self.connectors[connector_name].quantize_order_amount(trading_pair=trading_pair, amount=amount)
+        self.logger().info(f"{connector_name}: Creating {trading_pair} sell order: price: {price} amount: {quantized_amount}.")        
         return self.sell_with_specific_market(market_pair, amount, order_type, price, position_action=position_action)
         # return self.connectors[self.maker].sell(trading_pair, amount, order_type, price, position_action=position_action)
