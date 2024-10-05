@@ -1,12 +1,17 @@
+import asyncio
 import math
 import sys
 import time
+from concurrent.futures import Future
 from decimal import Decimal
 from typing import List
 
 import pandas as pd
 
+from hummingbot.client.hummingbot_application import HummingbotApplication
+from hummingbot.client.ui import version
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
+from hummingbot.core.data_type.in_flight_order import OrderState
 from hummingbot.core.data_type.order_candidate import OrderCandidate
 from hummingbot.core.event.events import (
     BuyOrderCreatedEvent,
@@ -17,6 +22,7 @@ from hummingbot.core.event.events import (
     SellOrderCreatedEvent,
 )
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
+from scripts.utility.telegram_utils import TelegramUtils
 
 # from hummingbot.core.data_type.order_book_tracker import OrderBookTracker
 # from hummingbot.core.data_type.order_book import OrderBook
@@ -54,8 +60,8 @@ class CrossMmCustom(ScriptStrategyBase):
 
     ###### PROFIT in fractions, 0.001 = 0.1% #######
     # maker fee can be added here
-    min_profit_sell = -0.02 #0.0005
-    min_profit_buy = -0.02 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
+    min_profit_sell = 0.02 #0.0005
+    min_profit_buy = 0.02 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
 
     ##### DUST VOLUME ##### in base asset units
     dust_vol_sell = 0.1 
@@ -121,7 +127,7 @@ class CrossMmCustom(ScriptStrategyBase):
 
     forget_time = 3600
 
-    base_precision_for_output = 1
+    base_precision_for_output = 4
     quote_precision_for_output = 2
 
     #if exchange supports edit order we can use this feature. Should be 0 or 1
@@ -218,12 +224,25 @@ class CrossMmCustom(ScriptStrategyBase):
     start_time = None
     idle_mode = False
     one_time_message_flag = False
-    
+    one_time_init_was_launched_before = False
+
+    # Helper function to disable execution of any routines inside on_tick() 
+    # if certain conditions are met
+    def go_passive(self):
+        if self.exit_bot_flag:
+            return True
+        if self.idle_mode:
+            return True
+
+
     def on_tick(self):
-        
+        self.exit_on_exit_bot_flag()
+        self.one_time_init()
         # self.logger().info("TICK STARTED!!!!!!!!!!!!!!!!!!!!!!!!!!")             
         # self.logger().info(self.connectors[self.taker].trading_rules)
         self.check_active_orders(debug_output=False) 
+
+        # self.connectors[self.maker].open_orders()
 
         # self.exit_after_some_time()
 
@@ -232,13 +251,12 @@ class CrossMmCustom(ScriptStrategyBase):
         #     self.logger().info("Stopping the bot due to One Order Only flag.")
         #     raise RuntimeError("Stopping the script due to a non-critical error.")
         
-        if self.exit_bot_flag:
-            
-            self.custom_cancel_all_orders()
-            if not self.one_time_message_flag: 
-                self.logger().info("Skipping all on_tick routines due to One Order Only flag.")
-                self.one_time_message_flag = True
-            return         
+        # if self.exit_bot_flag:
+        #     if not self.one_time_message_flag: 
+        #         self.logger().info("Skipping all on_tick routines due to Exit Bot flag.")
+        #         self.one_time_message_flag = True
+        #     self.soft_exit(cancel_active_orders=True)    
+        #     return         
 
         self.custom_init()
 
@@ -256,17 +274,39 @@ class CrossMmCustom(ScriptStrategyBase):
 
         return
 
-    def exit_after_some_time(self, time_period=7):
+    def exit_after_some_time(self, time_period=10):
+        if self.exit_bot_flag:
+            return
+        
         if self.start_time is None:
             self.start_time = time.time()
             self.logger().info("Script started. Timer initiated.")
-        # Check if 20 seconds have passed
+        # Check if time_period seconds have passed
         elapsed_time = time.time() - self.start_time
         if elapsed_time >= time_period:
             self.logger().info(f"{time_period} seconds have passed. Exiting the script.")
-            self.custom_cancel_all_orders()
-            raise RuntimeError("Stopping the script due to a non-critical error.")
+            self.soft_exit(cancel_active_orders=True)
+            # raise RuntimeError("Stopping the script due to a non-critical error.")
             # sys.exit()
+
+    # Exit routine if exit_bot_flag was set somewhere
+    def exit_on_exit_bot_flag(self):
+        
+        if self.exit_bot_flag:
+            self.logger().info(f"Exit bot flag was set. Exiting the script.")
+            self.soft_exit(cancel_active_orders=True)
+
+    def soft_exit(self, cancel_active_orders=True):
+        # if cancel_active_orders:
+            # time.sleep(3)
+            # self.custom_cancel_all_orders() 
+        
+        if not self.exit_bot_flag:
+            self.exit_bot_flag = True
+        message_text = "Skipping all on_tick routines due to Exit Bot flag. Stopping..."     
+        self.logger().info(message_text)
+        self.telegram_utils.send_unformatted_message(message_text)   
+        HummingbotApplication.main_application().stop()
 
     def custom_cancel_all_orders(self):
         if self.active_buy_order is not None:
@@ -275,6 +315,8 @@ class CrossMmCustom(ScriptStrategyBase):
             self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
 
     def buy_order_flow(self):
+        if self.go_passive():
+            return        
         if self.flow_mode == "sell":
             return
         if self.active_buy_order is None:
@@ -289,6 +331,8 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.custom_cancel_order(order=self.active_buy_order, debug_output=False) 
 
     def sell_order_flow(self):
+        if self.go_passive():
+            return        
         if self.flow_mode == "buy":
             return
         if self.active_sell_order is None:
@@ -302,42 +346,140 @@ class CrossMmCustom(ScriptStrategyBase):
             if self.cancel_order_condition(side=TradeType.SELL, debug_output=False):
                 self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
 
+    def get_instance_id(self):
+        return self.connectors[self.maker]._client_config.hb_config.instance_id
+
+    def one_time_init(self):
+        if self.go_passive():
+            return
+
+        if self.one_time_init_was_launched_before:
+            return
+        try: 
+            self.telegram_utils = TelegramUtils(self.maker, self.taker, self.maker_pair, self.taker_pair)
+            self.hummingbot = HummingbotApplication.main_application()
+            # instance_id = hummingbot.instance_id
+            instance_id = self.get_instance_id()
+            self.logger().info(f"Hummingbot Instance ID: {instance_id}")
+            in_flight_orders = self.connectors[self.maker].in_flight_orders
+            # self.logger().info(f"######### In Flight Orders: {in_flight_orders} ########")
+            
+            # If the exchange_id is None and the order is more than 20 seconds old something is wrong with it
+            # It was created and failed or cancelled. So it's just marked as Failed
+            if in_flight_orders:
+                for order in in_flight_orders.values():
+                    self.logger().notify(f"Strange In Flight Order Attributes: {order.attributes}")
+                    current_timestamp = int(time.time())    
+                    if order.exchange_order_id is None and order.current_state in (
+                        OrderState.PENDING_CREATE,
+                        OrderState.OPEN,
+                        OrderState.CREATED    
+                    ) and (current_timestamp - order.last_update_timestamp) > 20:
+                        order.current_state = OrderState.FAILED
+                        self.logger().notify(f"Fix in flight order {order.client_order_id} state to {order.current_state}")        
+
+            self.maker_base_symbol, self.maker_quote_symbol = self.connectors[self.maker].split_trading_pair(self.maker_pair)
+            self.taker_base_symbol, self.taker_quote_symbol = self.connectors[self.taker].split_trading_pair(self.taker_pair)
+
+            self.maker_base_free = None
+            self.maker_quote_free = None        
+            self.taker_base_free = None        
+            self.taker_quote_free = None        
+            self.maker_base_total = None        
+            self.maker_quote_total = None        
+            self.taker_base_total = None        
+            self.taker_quote_total = None
+            self.base_total = None
+            self.quote_total = None
+            self.starting_base_total = None
+            self.starting_quote_total = None
+            self.balances_data_dict = None
+
+            self.get_balances()
+
+            self.starting_base_total = self.base_total
+            self.starting_quote_total = self.quote_total
+    
+            # self.logger().info(f"Notifiers: {self.hummingbot.notifiers}")
+
+            
+
+            telegram_string = self.telegram_utils.bot_started_string(version, self.strategy, self.maker_fee, self.taker_fee)
+            self.hummingbot.notify(telegram_string)
+            self.logger().info(telegram_string)
+
+            # r = 2/0
+            # outputting balances
+            self.create_balances_data_dict()       
+
+            # self.logger().info(self.balances_data_dict)
+
+            telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
+            self.hummingbot.notify(telegram_string)
+        except Exception as e:
+            exc_text = f"There has been an error during initialization: {e}, now stopping..."
+            self.soft_exit()
+            self.logger().error(exc_text, exc_info=True)            
+            self.telegram_utils.send_unformatted_message(exc_text)
+            
+        
+        self.one_time_init_was_launched_before = True
+
+    def create_balances_data_dict(self):
+        self.balances_data_dict = {
+            'base_total': self.base_total,
+            'base_maker_total': self.maker_base_total,
+            'base_taker_total': self.taker_base_total,
+            'quote_total': self.quote_total,
+            'quote_maker_total': self.maker_quote_total,
+            'quote_taker_total': self.taker_quote_total,
+            'maker_name': self.maker,
+            'taker_name': self.taker,
+            'maker_base_symbol': self.maker_base_symbol,
+            'maker_quote_symbol': self.maker_quote_symbol,
+            'taker_base_symbol': self.taker_base_symbol,
+            'taker_quote_symbol': self.taker_quote_symbol,
+            'base_precision_for_output': self.base_precision_for_output,
+            'quote_precision_for_output': self.quote_precision_for_output,
+        }        
+
+    def get_balances(self):
+
+        self.maker_base_free = float(self.connectors[self.maker].get_available_balance(self.maker_base_symbol))
+        
+        self.maker_quote_free = float(self.connectors[self.maker].get_available_balance(self.maker_quote_symbol))
+
+        self.taker_base_free = float(self.connectors[self.taker].get_available_balance(self.taker_base_symbol))
+        
+        self.taker_quote_free = float(self.connectors[self.taker].get_available_balance(self.taker_quote_symbol))
+        # float(self.connectors[self.taker].get_balance(self.taker_quote_symbol)) 
+
+        self.maker_base_total = float(self.connectors[self.maker].get_balance(self.maker_base_symbol))
+        
+        self.maker_quote_total = float(self.connectors[self.maker].get_balance(self.maker_quote_symbol))
+
+        self.taker_base_total = float(self.connectors[self.taker].get_balance(self.taker_base_symbol))
+        
+        self.taker_quote_total = float(self.connectors[self.taker].get_balance(self.taker_quote_symbol))
+
+        self.base_total = self.maker_base_total + self.taker_base_total
+        self.quote_total = self.maker_quote_total + self.taker_quote_total        
+
     def custom_init(self):
+
+        if self.go_passive():
+            return
+        # self.hummingbot.notify("This <b>is</b> a left panel Notification!!!")
+        # self.logger().notify("This <b>is</b> a left panel and Telegram Notification!!!")
         # self.maker_base_symbol, self.maker_quote_symbol = self.maker_pair.split("-")
         # self.taker_base_symbol, self.taker_quote_symbol = self.taker_pair.split("-")
         
-        self.maker_base_symbol, self.maker_quote_symbol = self.connectors[self.maker].split_trading_pair(self.maker_pair)
-        self.taker_base_symbol, self.taker_quote_symbol = self.connectors[self.taker].split_trading_pair(self.taker_pair)
-
         # # Log the variables using logger().info
         # self.logger().info(f"Maker base symbol: {self.maker_base_symbol}, Maker quote symbol: {self.maker_quote_symbol}")
         # self.logger().info(f"Taker base symbol: {self.taker_base_symbol}, Taker quote symbol: {self.taker_quote_symbol}")           
 
         # self.connectors[self.maker].update_balances()
-        self.maker_base_free = None
-        self.maker_base_free = float(self.connectors[self.maker].get_available_balance(self.maker_base_symbol))
-        
-        self.maker_quote_free = None
-        self.maker_quote_free = float(self.connectors[self.maker].get_available_balance(self.maker_quote_symbol))
-
-        self.taker_base_free = None
-        self.taker_base_free = float(self.connectors[self.taker].get_available_balance(self.taker_base_symbol))
-        
-        self.taker_quote_free = None
-        self.taker_quote_free = float(self.connectors[self.taker].get_available_balance(self.taker_quote_symbol))
-        # float(self.connectors[self.taker].get_balance(self.taker_quote_symbol)) 
-
-        self.maker_base_total = None
-        self.maker_base_total = float(self.connectors[self.maker].get_balance(self.maker_base_symbol))
-        
-        self.maker_quote_total = None
-        self.maker_quote_total = float(self.connectors[self.maker].get_balance(self.maker_quote_symbol))
-
-        self.taker_base_total = None
-        self.taker_base_total = float(self.connectors[self.taker].get_balance(self.taker_base_symbol))
-        
-        self.taker_quote_total = None
-        self.taker_quote_total = float(self.connectors[self.taker].get_balance(self.taker_quote_symbol))
+        self.get_balances()
 
         if self.maker_quote_total is not None and self.maker_quote_free is not None:
             if self.maker_quote_free < self.maker_quote_total and self.active_buy_order:
@@ -364,7 +506,9 @@ class CrossMmCustom(ScriptStrategyBase):
         # self.logger().info(f"{self.maker_quote_symbol}: {self.maker_quote_free}")
 
     def calculate_planned_orders_sizes(self, debug_output=False):
-
+        if self.go_passive():
+            return
+        
         koef_for_calculating_amounts = (1 - self.maker_fee - self.taker_fee - self.min_profit_buy)
         # price_for_calc_min_sell_amount = self.connectors[self.maker].get_price_by_type(self.maker_pair, PriceType.BestAsk) * (1 - self.maker_fee)
         price_for_calc_min_buy_amount = float(self.connectors[self.maker].get_price_by_type(self.maker_pair, PriceType.BestBid)) * koef_for_calculating_amounts
@@ -396,6 +540,8 @@ class CrossMmCustom(ScriptStrategyBase):
             self.logger().info(f"order_size_buy: {self.order_size_buy}")
 
     def calculate_hedge_price(self, debug_output=False) -> Decimal:
+        if self.go_passive():
+            return        
         # ref_price = self.connectors[self.taker].get_price_by_type(self.taker_pair, self.price_source)
         
         # self.taker_ref_order_amount = (self.taker_volume_depth_for_best_ask_bid / ref_price)
@@ -449,6 +595,9 @@ class CrossMmCustom(ScriptStrategyBase):
     # Here we calculate the exact order sizes taking into consideration all maker and taker balances
     # and the required untouched balances on maker and taker        
     def adjust_orders_sizes(self, debug_output=False):
+        if self.go_passive():
+            return
+
         maker_untouched_amount = self.maker_min_balance_quote / self.hedge_price_buy
         taker_untouched_amount = self.taker_min_balance_quote / self.hedge_price_buy
 
@@ -481,8 +630,13 @@ class CrossMmCustom(ScriptStrategyBase):
     # Finds if there are any open orders and assigns
     # self.active_buy_order and self.active_sell_order
     def check_active_orders(self, debug_output=False):
-
+        if self.go_passive():
+            return
         self.active_limit_orders = self.get_active_orders(connector_name=self.maker)
+
+        # self.logger().info(f"######### Active Orders: {self.active_limit_orders} ########")
+        
+        # Cleaning up wrong orders from database
 
         # trying to get active orders through exchange entity. 
         # It works but the order tracking and balance functionality fails with this approach
@@ -604,7 +758,8 @@ class CrossMmCustom(ScriptStrategyBase):
             return False 
 
     def calc_orders_parameters(self, debug_output=False):
-        
+        if self.go_passive():
+            return        
         self.get_order_book_dict(self.maker, self.maker_pair, self.maker_order_book_depth)
         
         # if debug_output:
@@ -833,8 +988,8 @@ class CrossMmCustom(ScriptStrategyBase):
         # self.create_new_maker_order(side=new_order_side)
 
     def custom_cancel_order(self, order, debug_output=False):
-        
-        self.connectors[self.maker].cancel(order.trading_pair, order.client_order_id)
+        if order is not None:
+            self.connectors[self.maker].cancel(order.trading_pair, order.client_order_id)
     
     def cancel_order_condition(self, side=TradeType.BUY, debug_output=False):
         return False
@@ -872,20 +1027,58 @@ class CrossMmCustom(ScriptStrategyBase):
 
     def get_order_by_event(self, event: OrderFilledEvent):
         """
-        Returns an order object it's an active order or None
+        Returns an order object if it's an active order or None
         """
         for order in self.get_active_orders(connector_name=self.maker):
             if order.client_order_id == event.order_id:
                 return order
         return None
     
+    def get_taker_order_by_event(self, event: OrderFilledEvent):
+        """
+        Returns an order object if it's an active taker order or None
+        """
+        for order in self.get_active_orders(connector_name=self.taker):
+            if order.client_order_id == event.order_id:
+                return order
+        return None
+    
+    def format_filled_order_message(self, client_order_id, amount, price, quote_currency, base_currency, is_buy_order=True, is_maker_exchange_order=True):
+        if is_buy_order:
+            order_direction = "BUY"
+        else:
+            order_direction = "SELL"
+
+        if is_maker_exchange_order:
+            maker_or_taker = "MAKER"
+        else:
+            maker_or_taker = "TAKER"    
+
+        log_message = f"Filled {maker_or_taker} {order_direction} order for {amount * price} {quote_currency} ({amount} {base_currency} at {price} {quote_currency}). Order ID: {client_order_id}"
+        
+        telegram_message = f"Filled <b>{maker_or_taker} {order_direction}</b> order for <b>{amount * price} {quote_currency}</b> (<b>{amount} {base_currency}</b> at {price} {quote_currency}). Order ID: {client_order_id}"
+
+        return {'log_message': log_message, 
+                'telegram_message': telegram_message}
+
     def did_fill_order(self, event: OrderFilledEvent):
         
+        # Processing maker order fill event
         filled_order = self.get_order_by_event(event)
-
-        if event.trade_type == TradeType.BUY and (filled_order is not None):
             
-            self.logger().info(f"Filled MAKER BUY order {filled_order.client_order_id} for {event.amount * event.price} {filled_order.quote_currency} ({event.amount} {filled_order.base_currency} at {event.price} {filled_order.quote_currency})")            
+        if filled_order is not None and event.trade_type == TradeType.BUY:
+            order_message = self.format_filled_order_message(
+                filled_order.client_order_id, 
+                event.amount, 
+                event.price, 
+                filled_order.quote_currency, 
+                filled_order.base_currency, 
+                is_buy_order=True, 
+                is_maker_exchange_order=True
+            )
+            
+            self.logger().info(order_message['log_message'])
+            self.telegram_utils.send_unformatted_message(order_message['telegram_message'])            
 
             if self.one_order_only:
                 self.logger().info("One order only! No more orders should be placed.")
@@ -909,7 +1102,7 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.logger().info(f"Correcting SELL LIMIT amount on taker to {taker_sell_order_amount} because the quote balance on taker is not enough")
 
 
-            self.logger().info(f"Sending TAKER SELL order for {taker_sell_order_amount} {filled_order.base_currency} at price: {sell_price_with_slippage} {filled_order.quote_currency}")
+            
             
             sell_order = OrderCandidate(trading_pair=self.taker_pair, is_maker=False, order_type=OrderType.LIMIT, 
                                         order_side=TradeType.SELL, amount=Decimal(taker_sell_order_amount), price=sell_price_with_slippage)
@@ -918,11 +1111,25 @@ class CrossMmCustom(ScriptStrategyBase):
                 try:
                     self.place_order(self.taker, sell_order)
                 except Exception as e:
-                    self.logger().warning(f"An error of type {type(e).__name__} occurred while placing SELL order: {e}", exc_info=True)
+                    error_message = f"An error of type {type(e).__name__} occurred while placing taker SELL order: {e}"
+                    self.logger().error(error_message, exc_info=True)
+                    self.telegram_utils.send_unformatted_message(error_message)
+                else:
+                    self.logger().info(f"Sending TAKER SELL order for {taker_sell_order_amount} {filled_order.base_currency} at price: {sell_price_with_slippage} {filled_order.quote_currency}")
         
-        elif event.trade_type == TradeType.SELL and self.is_active_maker_order(event):
-
-            self.logger().info(f"Filled MAKER SELL order {filled_order.client_order_id} for {event.amount * event.price} {filled_order.quote_currency} ({event.amount} {filled_order.base_currency} at {event.price} {filled_order.quote_currency})")
+        elif filled_order is not None and event.trade_type == TradeType.SELL:
+            order_message = self.format_filled_order_message(
+                filled_order.client_order_id, 
+                event.amount, 
+                event.price, 
+                filled_order.quote_currency, 
+                filled_order.base_currency, 
+                is_buy_order=False, 
+                is_maker_exchange_order=True
+            )
+            
+            self.logger().info(order_message['log_message'])
+            self.telegram_utils.send_unformatted_message(order_message['telegram_message'])            
 
             if self.one_order_only:
                 self.logger().info("One order only! No more orders should be placed.")
@@ -949,8 +1156,7 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.logger().info(f"Correcting BUY LIMIT amount on taker to {taker_buy_order_amount} because the quote balance on taker is not enough")
 
 
-            self.logger().info(f"Sending TAKER BUY order for {taker_buy_order_amount} {filled_order.base_currency} at price: {buy_price_with_slippage} {filled_order.quote_currency}")
-
+            
             buy_order = OrderCandidate(trading_pair=self.taker_pair, is_maker=False, order_type=OrderType.LIMIT, 
                                         order_side=TradeType.BUY, amount=Decimal(taker_buy_order_amount), price=buy_price_with_slippage)
             
@@ -958,7 +1164,30 @@ class CrossMmCustom(ScriptStrategyBase):
                 try:
                     self.place_order(self.taker, buy_order)
                 except Exception as e:
-                    self.logger().warning(f"An error of type {type(e).__name__} occurred while placing BUY order: {e}", exc_info=True)
+                    error_message = f"An error of type {type(e).__name__} occurred while placing taker BUY order: {e}"
+                    self.logger().error(error_message, exc_info=True)
+                    self.telegram_utils.send_unformatted_message(error_message)                    
+                else:
+                    self.logger().info(f"Sending TAKER BUY order for {taker_buy_order_amount} {filled_order.base_currency} at price: {buy_price_with_slippage} {filled_order.quote_currency}")
+
+        # Sending notification if a taker order is filled
+        filled_order = self.get_taker_order_by_event(event)
+        
+        if filled_order is not None:
+            is_buy_order = (event.trade_type == TradeType.BUY)
+           
+            order_message = self.format_filled_order_message(
+                filled_order.client_order_id, 
+                event.amount, 
+                event.price, 
+                filled_order.quote_currency, 
+                filled_order.base_currency, 
+                is_buy_order=is_buy_order, 
+                is_maker_exchange_order=False
+            )
+            
+            # self.logger().info(order_message['log_message'])
+            self.telegram_utils.send_unformatted_message(order_message['telegram_message'])             
 
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):

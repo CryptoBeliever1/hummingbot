@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from bidict import bidict
 
+from hummingbot.client.hummingbot_application import HummingbotApplication
 from hummingbot.connector.constants import s_decimal_NaN
 from hummingbot.connector.exchange.kraken_v2 import kraken_v2_constants as CONSTANTS, kraken_v2_web_utils as web_utils
 from hummingbot.connector.exchange.kraken_v2.kraken_v2_api_order_book_data_source import KrakenV2APIOrderBookDataSource
@@ -27,7 +28,7 @@ from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.connector.utils import get_new_numeric_client_order_id
 from hummingbot.core.api_throttler.async_throttler import AsyncThrottler
-from hummingbot.core.data_type.common import OrderType, TradeType
+from hummingbot.core.data_type.common import OpenOrder, OrderType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState, OrderUpdate, TradeUpdate
 from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
 from hummingbot.core.data_type.trade_fee import TokenAmount, TradeFeeBase
@@ -71,7 +72,7 @@ class KrakenV2Exchange(ExchangePyBase):
         self._client_order_id_nonce_provider = NonceCreator.for_microseconds()
         self._throttler = self._build_async_throttler(api_tier=self._kraken_v2_api_tier)
         self.rate_count = 0
-
+        
         super().__init__(client_config_map)
 
     @staticmethod
@@ -225,6 +226,48 @@ class KrakenV2Exchange(ExchangePyBase):
                                                   CONSTANTS.OPEN_ORDERS_PATH_URL,
                                                   is_auth_required=True,
                                                   data=data)
+
+    async def get_open_orders(self) -> List[OpenOrder]:
+        open_orders = await self._api_request_with_retry(RESTMethod.POST, CONSTANTS.OPEN_ORDERS_PATH_URL,
+                                                         is_auth_required=True)
+
+        self.logger().info(f"Open orders message: {open_orders}")
+        ret_val = []
+        for exchange_order_id in open_orders.get("open"):
+            order = open_orders["open"][exchange_order_id]
+            if order.get("status") != "open" and order.get("status") != "pending":
+                continue
+            details = order.get("descr")        
+            if details["ordertype"] != "limit":
+                self.logger().info(f"Unsupported order type found: {order['type']}")
+                continue
+            # trading_pair = convert_from_exchange_trading_pair(details["pair"])
+            # if trading_pair is None:
+            trading_pair = convert_from_exchange_trading_pair(
+                    details["pair"], tuple((await self.get_asset_pairs()).keys())
+                ) 
+
+            ret_val.append(
+                OpenOrder(
+                    client_order_id=order["userref"],
+                    trading_pair=trading_pair,
+                    price=Decimal(str(details["price"])),
+                    amount=Decimal(str(order["vol"])),
+                    executed_amount=Decimal(str(order["vol_exec"])),
+                    status=order["status"],
+                    order_type=OrderType.LIMIT,
+                    is_buy=True if details["type"].lower() == "buy" else False,
+                    time=int(order["opentm"]),
+                    exchange_order_id=exchange_order_id
+                )
+            )
+
+        self.logger().info(f"Parsed open orders: {ret_val}")
+        return ret_val
+
+
+    def open_orders(self):
+        safe_ensure_future(self.get_open_orders())
 
     # custom method for testing
     def say_hello(self):
@@ -732,12 +775,17 @@ class KrakenV2Exchange(ExchangePyBase):
         for order_msg in orders:
             self.logger().info(f"Received Order Message. Order: {order_msg}")
             client_order_id = str(order_msg.get("order_userref", ""))
+            exchange_order_id = order_msg.get("order_id")
             tracked_order = self._order_tracker.all_updatable_orders.get(client_order_id)
-            
+
             if not tracked_order:
                 self.logger().debug(
                     f"Ignoring order message with client id {client_order_id}: not in in_flight_orders.")
                 continue
+            
+            if exchange_order_id is not None and tracked_order.exchange_order_id is None:
+                tracked_order.exchange_order_id = str(exchange_order_id)            
+            
             if "order_status" in order_msg:
                 order_update = self._create_ws_order_update_with_order_status_data(order_status=order_msg,
                                                                                 order=tracked_order)

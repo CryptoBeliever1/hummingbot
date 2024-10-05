@@ -37,7 +37,6 @@ def convert_to_exchange_symbol(symbol: str) -> str:
     inverted_kraken_v2_to_hb_map = {v: k for k, v in CONSTANTS.KRAKEN_V2_TO_HB_MAP.items()}
     return inverted_kraken_v2_to_hb_map.get(symbol, symbol)
 
-
 def split_to_base_quote(exchange_trading_pair: str) -> Tuple[Optional[str], Optional[str]]:
     base, quote = exchange_trading_pair.split("-")
     return base, quote
@@ -56,21 +55,33 @@ def convert_from_exchange_trading_pair(exchange_trading_pair: str, available_tra
         connector_trading_pair = {''.join(convert_from_exchange_trading_pair(tp).split('-')): tp for tp in
                                   available_trading_pairs}.get(
             exchange_trading_pair)
+        if connector_trading_pair:    
+            # print(f"Option 1. There was no splitter in pair {exchange_trading_pair} and now it's {connector_trading_pair}")
+            connector_trading_pair = convert_from_exchange_trading_pair(connector_trading_pair)
+            # print(f"Option 1 FIX. New pair = {connector_trading_pair}")
         if not connector_trading_pair:
             # Option 2: Using kraken_v2 naming convention ( XXBT for Bitcoin, XXDG for Doge, ZUSD for USD, etc)
             connector_trading_pair = {''.join(tp.split('-')): tp for tp in available_trading_pairs}.get(
                 exchange_trading_pair)
+            if connector_trading_pair:
+                # print(f"Option 2. There was no splitter in pair {exchange_trading_pair} and now it's {connector_trading_pair}")
+                connector_trading_pair = convert_from_exchange_trading_pair(connector_trading_pair)
+            #     connector_trading_pair = convert_from_exchange_trading_pair(connector_trading_pair)
             if not connector_trading_pair:
                 # Option 3: KrakenV2 naming convention but without the initial X and Z
                 connector_trading_pair = {''.join(convert_to_exchange_symbol(convert_from_exchange_symbol(s))
                                                   for s in tp.split('-')): tp
                                           for tp in available_trading_pairs}.get(exchange_trading_pair)
+                if connector_trading_pair:
+                    # print(f"Option 3. There was no splitter in pair {exchange_trading_pair} and now it's {connector_trading_pair}")
+                    connector_trading_pair = convert_from_exchange_trading_pair(connector_trading_pair)
         return connector_trading_pair
 
     if not base or not quote:
         return None
     base = convert_from_exchange_symbol(base)
     quote = convert_from_exchange_symbol(quote)
+    # print(f"The trading pair had a splitter initially ({exchange_trading_pair}) and now it's {base}-{quote}")
     return f"{base}-{quote}"
 
 
