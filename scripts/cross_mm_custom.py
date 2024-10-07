@@ -22,6 +22,7 @@ from hummingbot.core.event.events import (
     SellOrderCreatedEvent,
 )
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
+from scripts.utility.crossbot import Timer
 from scripts.utility.telegram_utils import TelegramUtils
 
 # from hummingbot.core.data_type.order_book_tracker import OrderBookTracker
@@ -61,11 +62,11 @@ class CrossMmCustom(ScriptStrategyBase):
     ###### PROFIT in fractions, 0.001 = 0.1% #######
     # maker fee can be added here
     min_profit_sell = 0.02 #0.0005
-    min_profit_buy = 0.02 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
+    min_profit_buy = 0.00025 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
 
     ##### DUST VOLUME ##### in base asset units
     dust_vol_sell = 0.1 
-    dust_vol_buy = 0.1
+    dust_vol_buy = 1
     #####             ##### 
 
     # in quote currency. This setting can be used to put the order with THE SAME
@@ -73,7 +74,7 @@ class CrossMmCustom(ScriptStrategyBase):
     # compared to the max accuracy of the base asset on maker exchange
     # For example, if min step is 1e-8, put 1e-9
     order_price_step_sell = 0.2 #9.8e-9 #1e-9
-    order_price_step_buy = 0.2
+    order_price_step_buy = 0.05
 
     # this is the max allowed distance up from the dust price
     # if the order price stays within the distance, it's not edited
@@ -83,18 +84,18 @@ class CrossMmCustom(ScriptStrategyBase):
     # if it's too high the order may hang at the top of the order book 
     # for longer periods even if the competitors with high volumes
     # remove their orders from the top
-    order_price_safe_distance_sell = 0.8
-    order_price_safe_distance_buy = 1
+    order_price_safe_distance_sell = 0.3 #0.8
+    order_price_safe_distance_buy = 0.2 #1
 
     # if we have to put the order close to the hedge price 
     # this is the distance from the hedge price we put it to
-    hedge_price_step_sell = 0.03
-    hedge_price_step_buy = 0.03
+    hedge_price_step_sell = 0.2
+    hedge_price_step_buy = 0.1
 
     # if the hedge price is out of the volume window, the order price will
     # be kept within this distance from the hedge price
     hedge_price_safe_distance_sell = 1
-    hedge_price_safe_distance_buy = 1
+    hedge_price_safe_distance_buy = 0.5
 
     maker_order_book_depth = 30
     # possible options are:
@@ -226,22 +227,31 @@ class CrossMmCustom(ScriptStrategyBase):
     one_time_message_flag = False
     one_time_init_was_launched_before = False
 
+    # for some exchanges ther's an API resource use counter
+    rate_count_max_limit = 110
+    previously_processed_rate_count_update_timestamp = None
+    # start_time: timestamp with milliseconds
+    # how_long: pause in milliseconds
+    idle_timer = Timer()
+
     # Helper function to disable execution of any routines inside on_tick() 
     # if certain conditions are met
     def go_passive(self):
         if self.exit_bot_flag:
             return True
-        if self.idle_mode:
+        if self.idle_timer.timer_is_active:
             return True
-
+        return False
 
     def on_tick(self):
         self.exit_on_exit_bot_flag()
+        self.idle_timer.deactivate_if_time_passed()
         self.one_time_init()
         # self.logger().info("TICK STARTED!!!!!!!!!!!!!!!!!!!!!!!!!!")             
         # self.logger().info(self.connectors[self.taker].trading_rules)
         self.check_active_orders(debug_output=False) 
 
+        self.check_rate_count()
         # self.connectors[self.maker].open_orders()
 
         # self.exit_after_some_time()
@@ -308,11 +318,11 @@ class CrossMmCustom(ScriptStrategyBase):
         self.telegram_utils.send_unformatted_message(message_text)   
         HummingbotApplication.main_application().stop()
 
-    def custom_cancel_all_orders(self):
+    def custom_cancel_all_orders(self, debug_output=False):
         if self.active_buy_order is not None:
-            self.custom_cancel_order(order=self.active_buy_order, debug_output=False)
+            self.custom_cancel_order(order=self.active_buy_order, debug_output=debug_output)
         if self.active_buy_order is not None:    
-            self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
+            self.custom_cancel_order(order=self.active_sell_order, debug_output=debug_output)
 
     def buy_order_flow(self):
         if self.go_passive():
@@ -989,6 +999,8 @@ class CrossMmCustom(ScriptStrategyBase):
 
     def custom_cancel_order(self, order, debug_output=False):
         if order is not None:
+            if debug_output:
+                self.logger().info(f"custom_cancel_order: Cancelling order {order.client_order_id}...")
             self.connectors[self.maker].cancel(order.trading_pair, order.client_order_id)
     
     def cancel_order_condition(self, side=TradeType.BUY, debug_output=False):
@@ -1004,10 +1016,10 @@ class CrossMmCustom(ScriptStrategyBase):
         # pass
 
     def did_cancel_order(self, event: OrderCancelledEvent):
-        self.logger().info(f"Catched Order cancel!!!")
+        # self.logger().info(f"Catched Order cancel!!!")
         if (self.create_buy_order_after_cancel_in_current_tick_cycle == True 
             and self.buy_order_client_id_to_edit_in_current_tick_cycle == event.order_id):
-            self.logger().info(f"Catched Order cancel and creating a new order! Cancelled order id: {self.buy_order_client_id_to_edit_in_current_tick_cycle}")
+            # self.logger().info(f"Catched Order cancel and creating a new order! Cancelled order id: {self.buy_order_client_id_to_edit_in_current_tick_cycle}")
             self.create_new_maker_order(side=TradeType.BUY)
 
         if (self.create_sell_order_after_cancel_in_current_tick_cycle == True 
@@ -1189,6 +1201,44 @@ class CrossMmCustom(ScriptStrategyBase):
             # self.logger().info(order_message['log_message'])
             self.telegram_utils.send_unformatted_message(order_message['telegram_message'])             
 
+    def check_rate_count(self):
+        if not hasattr(self.connectors[self.maker], 'rate_count'):
+            return
+        if self.idle_timer.timer_is_active:
+            return
+        
+        rate_count = self.connectors[self.maker].rate_count
+        # transform in milliseconds
+        rate_count_timestamp = self.connectors[self.maker].rate_count_update_timestamp
+        
+        if rate_count_timestamp is None:
+            return        
+        rate_count_timestamp = int(rate_count_timestamp) * 1000
+                
+        # if self.previously_processed_rate_count_update_timestamp is not None:
+        #     # if the current 'rate_count' value was processed before
+        #     if rate_count_timestamp <= self.previously_processed_rate_count_update_timestamp:
+        #         return
+        delay = 25000
+
+        # debug_string = (f"Evaluating: ({rate_count_timestamp} + {delay} - 2000) "
+        #         f"< ({self.connectors[self.maker].current_timestamp} * 1000 = {self.connectors[self.maker].current_timestamp * 1000})")
+    
+        # self.logger().info(debug_string)
+        if rate_count_timestamp + delay - 2000 < self.connectors[self.maker].current_timestamp * 1000:
+            # self.logger().info(f"The latest rate_count_timestamp is too old, skip checking...")
+            return
+        
+        if rate_count > self.rate_count_max_limit:
+                        # previous_idle_timer_state = self.idle_timer.timer_is_active
+            self.idle_timer.start_and_enable_timer_is_active_flag(delay)
+            self.previously_processed_rate_count_update_timestamp = rate_count_timestamp
+            self.custom_cancel_all_orders(debug_output=True)
+            
+            message = f"Rate Count Max limit exceeded ({rate_count} > {self.rate_count_max_limit}). Pausing for {delay / 1000:.3g} seconds."
+            # \n Rate_count_timestamp: {self.connectors[self.maker].rate_count_update_timestamp}\n"
+            self.logger().info(message)
+            self.telegram_utils.send_unformatted_message(message)
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):
 
@@ -1266,6 +1316,7 @@ class CrossMmCustom(ScriptStrategyBase):
         lines.extend([f"planned_order_price_buy: {self.planned_order_price_buy}"])
         lines.extend([f"dust_vol_price_buy: {self.dust_vol_limit_price_buy} - hedge_price_buy: {self.hedge_price_buy}"])
         lines.extend([f"rate_count: {rate_count}"])
+        lines.extend([f"rate_count_timestamp: {self.connectors[self.maker].rate_count_update_timestamp}"])
         lines.extend([f"self.maker_base_free: {self.maker_base_free}"])
         lines.extend([f"self.maker_quote_free: {self.maker_quote_free}"])
         # lines.extend([f"trading_rules on maker: {self.connectors[self.maker].trading_rules.get(self.maker_pair)}"])

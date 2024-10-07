@@ -72,6 +72,7 @@ class KrakenV2Exchange(ExchangePyBase):
         self._client_order_id_nonce_provider = NonceCreator.for_microseconds()
         self._throttler = self._build_async_throttler(api_tier=self._kraken_v2_api_tier)
         self.rate_count = 0
+        self.rate_count_update_timestamp = None
         
         super().__init__(client_config_map)
 
@@ -725,6 +726,7 @@ class KrakenV2Exchange(ExchangePyBase):
         rate_counter = order_fill.get("ratecount", None)
         if rate_counter is not None:
             self.rate_count = int(rate_counter)
+            self.rate_count_update_timestamp = self.current_timestamp
 
         return trade_update
 
@@ -793,6 +795,9 @@ class KrakenV2Exchange(ExchangePyBase):
             rate_counter = order_msg.get("ratecount", None)
             if rate_counter is not None:
                 self.rate_count = int(rate_counter)
+                # self.current_timestamp example: 1728233623.0
+                # it is in seconds 
+                self.rate_count_update_timestamp = self.current_timestamp
                 # self.logger().info(f"self.rate_count changed: {self.rate_count}")    
 
     async def _all_trade_updates_for_order(self, order: InFlightOrder) -> List[TradeUpdate]:
