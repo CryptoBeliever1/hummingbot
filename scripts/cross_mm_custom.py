@@ -2,6 +2,7 @@ import asyncio
 import math
 import sys
 import time
+import traceback
 from concurrent.futures import Future
 from decimal import Decimal
 from typing import List
@@ -61,12 +62,12 @@ class CrossMmCustom(ScriptStrategyBase):
 
     ###### PROFIT in fractions, 0.001 = 0.1% #######
     # maker fee can be added here
-    min_profit_sell = 0.02 #0.0005
-    min_profit_buy = 0.00025 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
+    min_profit_sell = -0.006 #0.0005
+    min_profit_buy = -0.005 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
 
     ##### DUST VOLUME ##### in base asset units
     dust_vol_sell = 0.1 
-    dust_vol_buy = 1
+    dust_vol_buy = 0.1
     #####             ##### 
 
     # in quote currency. This setting can be used to put the order with THE SAME
@@ -74,7 +75,7 @@ class CrossMmCustom(ScriptStrategyBase):
     # compared to the max accuracy of the base asset on maker exchange
     # For example, if min step is 1e-8, put 1e-9
     order_price_step_sell = 0.2 #9.8e-9 #1e-9
-    order_price_step_buy = 0.05
+    order_price_step_buy = 0.2
 
     # this is the max allowed distance up from the dust price
     # if the order price stays within the distance, it's not edited
@@ -85,7 +86,7 @@ class CrossMmCustom(ScriptStrategyBase):
     # for longer periods even if the competitors with high volumes
     # remove their orders from the top
     order_price_safe_distance_sell = 0.3 #0.8
-    order_price_safe_distance_buy = 0.2 #1
+    order_price_safe_distance_buy = 0.3 #1
 
     # if we have to put the order close to the hedge price 
     # this is the distance from the hedge price we put it to
@@ -220,7 +221,7 @@ class CrossMmCustom(ScriptStrategyBase):
     taker_best_bid_price_coef = 0.99
     # buy_order_placed = False
     # sell_order_placed = False
-    one_order_only = True
+    one_order_only = False
     exit_bot_flag = False
     start_time = None
     idle_mode = False
@@ -228,60 +229,84 @@ class CrossMmCustom(ScriptStrategyBase):
     one_time_init_was_launched_before = False
 
     # for some exchanges ther's an API resource use counter
-    rate_count_max_limit = 110
+    rate_count_max_limit = 130
     previously_processed_rate_count_update_timestamp = None
     # start_time: timestamp with milliseconds
     # how_long: pause in milliseconds
-    idle_timer = Timer()
+    # idle_timer = Timer()
+    idle_timers = []
 
     # Helper function to disable execution of any routines inside on_tick() 
     # if certain conditions are met
     def go_passive(self):
         if self.exit_bot_flag:
             return True
-        if self.idle_timer.timer_is_active:
+        if self.any_of_timers_is_active():
             return True
         return False
 
+    def any_of_timers_is_active(self):
+        '''Checks '.timer_is_active' flag for all timers.
+        Returns True if any of them is true'''
+        for timer in self.idle_timers:
+            if timer.timer_is_active:
+                return True
+        return False    
+
+
+    def disable_outdated_timers(self):
+        '''Remove timers from idle_timers if their time has passed.'''
+        if self.idle_timers:  # Only proceed if idle_timers is not empty
+            self.idle_timers = [timer for timer in self.idle_timers if not timer.has_time_passed()]
+            # if not self.idle_timers:
+            #     self.logger().info(f"Some timer disabled")  
+
+
     def on_tick(self):
-        self.exit_on_exit_bot_flag()
-        self.idle_timer.deactivate_if_time_passed()
-        self.one_time_init()
-        # self.logger().info("TICK STARTED!!!!!!!!!!!!!!!!!!!!!!!!!!")             
-        # self.logger().info(self.connectors[self.taker].trading_rules)
-        self.check_active_orders(debug_output=False) 
+        try:
+            self.exit_on_exit_bot_flag()
+            # self.idle_timer.deactivate_if_time_passed()
+            self.disable_outdated_timers()
+            self.one_time_init()
+            # self.logger().info("TICK STARTED!!!!!!!!!!!!!!!!!!!!!!!!!!")             
+            # self.logger().info(self.connectors[self.taker].trading_rules)
+            self.check_active_orders(debug_output=False) 
 
-        self.check_rate_count()
-        # self.connectors[self.maker].open_orders()
+            self.check_rate_count()
+            # self.connectors[self.maker].open_orders()
 
-        # self.exit_after_some_time()
-
-        # if self.exit_bot_flag and self.one_order_only:
-        #     self.custom_cancel_all_orders()            
-        #     self.logger().info("Stopping the bot due to One Order Only flag.")
-        #     raise RuntimeError("Stopping the script due to a non-critical error.")
+            # self.exit_after_some_time()
         
-        # if self.exit_bot_flag:
-        #     if not self.one_time_message_flag: 
-        #         self.logger().info("Skipping all on_tick routines due to Exit Bot flag.")
-        #         self.one_time_message_flag = True
-        #     self.soft_exit(cancel_active_orders=True)    
-        #     return         
+            self.custom_init()
 
-        self.custom_init()
+            # k = unknown
 
-        self.calculate_planned_orders_sizes(debug_output=False)
+            self.calculate_planned_orders_sizes(debug_output=False)
 
-        self.calculate_hedge_price(debug_output=False)       
+            self.calculate_hedge_price(debug_output=False)       
 
-        self.adjust_orders_sizes(debug_output=False) 
+            self.adjust_orders_sizes(debug_output=False) 
 
-        self.calc_orders_parameters(debug_output=False)
+            self.calc_orders_parameters(debug_output=False)
 
-        self.buy_order_flow()
+            self.buy_order_flow()
 
-        self.sell_order_flow()
+            self.sell_order_flow()
+        
+        except IOError as e:
+            # Static part of the expected message
+            expected_static_part = "Skipped order update with order fills for"            
+            if expected_static_part in str(e) and "waiting for exchange order id." in str(e):
+                self.standard_exception_message_sending(e, exception_source="on tick cycle")
+                time.sleep(2)
+            else:
+                # Re-raise the exception if it's not the specific one you're looking for
+                raise
 
+        except Exception as e:
+            self.standard_exception_message_sending(e, exception_source="on tick cycle")
+            self.soft_exit()                        
+        
         return
 
     def exit_after_some_time(self, time_period=10):
@@ -1074,8 +1099,11 @@ class CrossMmCustom(ScriptStrategyBase):
                 'telegram_message': telegram_message}
 
     def did_fill_order(self, event: OrderFilledEvent):
-        
-        # Processing maker order fill event
+        '''
+        Both maker exchange and taker exchange filled events are processed 
+        '''
+
+        # Processing Maker order fill event
         filled_order = self.get_order_by_event(event)
             
         if filled_order is not None and event.trade_type == TradeType.BUY:
@@ -1182,6 +1210,19 @@ class CrossMmCustom(ScriptStrategyBase):
                 else:
                     self.logger().info(f"Sending TAKER BUY order for {taker_buy_order_amount} {filled_order.base_currency} at price: {buy_price_with_slippage} {filled_order.quote_currency}")
 
+        if filled_order is not None:
+
+            # Cancel all orders because balances have changed and 
+            # the filled order may not have been filled completely
+            # Also making a small delay to wait for the balances update
+            # so the new orders could be added correctly
+            self.custom_cancel_all_orders()
+            durtaion = 2500
+            # self.logger().info(f"Starting timer 'after_order_is_filled_timer' for {durtaion} ms")
+            self.idle_timers.append(Timer(name="after_order_is_filled_timer", duration=durtaion))
+                  
+        
+        # Processing Taker order filled event
         # Sending notification if a taker order is filled
         filled_order = self.get_taker_order_by_event(event)
         
@@ -1202,9 +1243,19 @@ class CrossMmCustom(ScriptStrategyBase):
             self.telegram_utils.send_unformatted_message(order_message['telegram_message'])             
 
     def check_rate_count(self):
+        """
+        Checks the rate count of the maker connector Kraken and determines if it exceeds the allowed limit. 
+        If the rate count is too high, the bot will pause for a specified delay. This function is 
+        responsible for controlling the rate of order submissions by evaluating the connector's 
+        rate count and its timestamp. If the rate count exceeds the 
+        maximum limit, it triggers actions such as pausing and canceling orders.
+        Since ratecount is ONLY updated asynchronously when the order is created 
+        or filled or cancelled (and it's not possible to retreive it with POST API), 
+        the ratecount timestamp is used to get out of the idle mode.
+        """
         if not hasattr(self.connectors[self.maker], 'rate_count'):
             return
-        if self.idle_timer.timer_is_active:
+        if self.any_of_timers_is_active():
             return
         
         rate_count = self.connectors[self.maker].rate_count
@@ -1219,7 +1270,7 @@ class CrossMmCustom(ScriptStrategyBase):
         #     # if the current 'rate_count' value was processed before
         #     if rate_count_timestamp <= self.previously_processed_rate_count_update_timestamp:
         #         return
-        delay = 25000
+        delay = 5000
 
         # debug_string = (f"Evaluating: ({rate_count_timestamp} + {delay} - 2000) "
         #         f"< ({self.connectors[self.maker].current_timestamp} * 1000 = {self.connectors[self.maker].current_timestamp * 1000})")
@@ -1231,7 +1282,9 @@ class CrossMmCustom(ScriptStrategyBase):
         
         if rate_count > self.rate_count_max_limit:
                         # previous_idle_timer_state = self.idle_timer.timer_is_active
-            self.idle_timer.start_and_enable_timer_is_active_flag(delay)
+            
+            self.idle_timers.append(Timer(name="rate_count_idle_timer", duration=delay))
+            
             self.previously_processed_rate_count_update_timestamp = rate_count_timestamp
             self.custom_cancel_all_orders(debug_output=True)
             
@@ -1412,3 +1465,12 @@ class CrossMmCustom(ScriptStrategyBase):
         self.logger().info(f"{connector_name}: Creating {trading_pair} sell order: price: {price} amount: {quantized_amount}.")        
         return self.sell_with_specific_market(market_pair, amount, order_type, price, position_action=position_action)
         # return self.connectors[self.maker].sell(trading_pair, amount, order_type, price, position_action=position_action)
+    
+    def standard_exception_message_sending(self, exception_object, exception_source="somewhere", send_notification=True):
+        exc_info = sys.exc_info()
+        exc_text = f"Caught an exception <b>'{exception_object}'</b> in <b>{exception_source}.</b>"
+        cleaned_string = exc_text.replace("<b>", "").replace("</b>", "")
+        self.logger().error(cleaned_string, exc_info=True)
+        if send_notification:
+            exc_text += "\n" + "".join(traceback.format_exception(*exc_info))           
+            self.telegram_utils.send_unformatted_message(exc_text)        
