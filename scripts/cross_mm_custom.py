@@ -1,16 +1,20 @@
 import asyncio
 import math
+import os
 import sys
 import time
 import traceback
 from concurrent.futures import Future
 from decimal import Decimal
-from typing import List
+from typing import Dict
 
 import pandas as pd
+from pydantic import Field
 
+from hummingbot.client.config.config_data_types import BaseClientModel, ClientFieldData
 from hummingbot.client.hummingbot_application import HummingbotApplication
 from hummingbot.client.ui import version
+from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.in_flight_order import OrderState
 from hummingbot.core.data_type.order_candidate import OrderCandidate
@@ -33,49 +37,251 @@ from scripts.utility.telegram_utils import TelegramUtils
 # from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
 # from hummingbot.connector.connector_base import ConnectorBase
 
+class CrossMMCustomConfig(BaseClientModel):
+    script_file_name: str = Field(default_factory=lambda: os.path.basename(__file__))
+    # Name of the script file
+    # Flow mode options: both, buy, sell
+    flow_mode: str = Field("buy", client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Flow mode: both, buy, or sell"
+    ))
+    # Maker exchange
+    maker: str = Field("kraken_v2", client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Maker exchange"
+    ))
+    # Taker exchange
+    taker: str = Field("mexc", client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Taker exchange"
+    ))
+    # Trading pair for maker
+    maker_pair: str = Field("GNO-USD", client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Trading pair for maker"
+    ))
+    # Trading pair for taker
+    taker_pair: str = Field("GNO-USDT", client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Trading pair for taker"
+    ))
+    # Round up to this value in best price calculations from taker asks bids
+    order_price_precision: int = Field(2, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Order price precision"
+    ))
+    # Round up to this value in best price calculations from taker asks bids
+    order_base_precision: int = Field(2, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Order base precision"
+    ))
+
+    # Maker fee
+    maker_fee: float = Field(0.0025, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Maker fee percentage, (0.001 = 0.1%)"
+    ))
+    # Taker fee
+    taker_fee: float = Field(0.0002, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Taker fee percentage, (0.001 = 0.1%)"
+    ))
+    # Minimum profit for sell
+    min_profit_sell: float = Field(0.01, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Minimum profit for sell in fractions (e.g., 0.001 = 0.1%)"
+    ))
+    # Minimum profit for buy
+    min_profit_buy: float = Field(0.01, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Minimum profit for buy in fractions (e.g., 0.001 = 0.1%)"
+    ))
+    # Dust volume in base asset units
+    dust_vol_sell: float = Field(0.1, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Dust volume for sell in base asset units"
+    ))
+    # Dust volume in base asset units
+    dust_vol_buy: float = Field(0.1, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Dust volume for buy in base asset units"
+    ))
+
+    # in quote currency. This setting can be used to put the order with THE SAME
+    # PRICE as the current best order. Just increase the accuracy by 10 times
+    # compared to the max accuracy of the base asset on maker exchange
+    # For example, if min step is 1e-8, put 1e-9
+    order_price_step_sell: float = Field(0.2, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Order price step for sell"
+    ))
+    order_price_step_buy: float = Field(0.2, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Order price step for buy"
+    ))
+
+    # This is the max allowed distance up from the dust price
+    # If the order price stays within the distance, it's not edited
+    # The purpose is to maximise profit
+    # If it's too small the order will be edited frequently
+    # and the rate limits can be exceeded
+    # If it's too high the order may hang at the top of the order book 
+    # for longer periods even if the competitors with high volumes
+    # remove their orders from the top    
+    order_price_safe_distance_sell: float = Field(0.3, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Order price safe distance for sell"
+    ))
+    order_price_safe_distance_buy: float = Field(0.3, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Order price safe distance for buy"
+    ))
+    
+    # if we have to put the order close to the hedge price 
+    # this is the distance from the hedge price we put it to
+    hedge_price_step_sell: float = Field(0.2, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Hedge price step for sell"
+    ))
+    hedge_price_step_buy: float = Field(0.1, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Hedge price step for buy"
+    ))
+        
+    # if the hedge price is out of the volume window, the order price will
+    # be kept within this distance from the hedge price
+    hedge_price_safe_distance_sell: float = Field(1, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Hedge price safe distance for sell"
+    ))
+    hedge_price_safe_distance_buy: float = Field(0.5, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Hedge price safe distance for buy"
+    ))
+    maker_order_book_depth: int = Field(30, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Maker order book depth"
+    ))
+    strategy: str = Field("default", client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Strategy to use: 'default' or 'keep_tick_level'"
+    ))
+
+    # at what level to keep the order at maker, starting from 1
+    keep_tick_number_buy: int = Field(2, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Tick level to keep for buy orders"
+    ))
+    keep_tick_number_sell: int = Field(2, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Tick level to keep for sell orders"
+    ))
+
+    # in adaptive mode the below values are used as MAXIMAL order size (Base asset)
+    amount_sell: float = Field(0.1, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Maximal order size for sell in base asset"
+    ))
+    amount_buy: float = Field(0.1, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Maximal order size for buy in base asset"
+    ))
+
+    # minimal order amount nominated in quote asset
+    min_notional_maker: float = Field(5, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Minimal order amount for maker in quote asset"
+    ))
+    min_notional_taker: float = Field(5, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Minimal order amount for taker in quote asset"
+    ))
+
+    # adaptive order amount in fraction of the max available asset volume in the wallet    
+    adaptive_amount_sell_fraction: float = Field(1, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Adaptive amount fraction for sell (of max available)"
+    ))
+    adaptive_amount_buy_fraction: float = Field(1, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Adaptive amount fraction for buy (of max available)"
+    ))
+    forget_time: int = Field(3600, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Forget time in seconds"
+    ))
+    base_precision_for_output: int = Field(4, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Base precision for output"
+    ))
+    quote_precision_for_output: int = Field(2, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Quote precision for output"
+    ))
+    edit_order_mode: int = Field(1, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Edit order mode: 1 for enabled, 0 for disabled"
+    ))
+    
+    # key is the number of seconds for a measuring timeframe, value is the limit in % per min    
+    price_speed_limits: dict = Field({'previous': 6.5, 4: 4.9, 8: 3.1, 16: 2.16, 32: 1.25}, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Price speed limits as a dictionary"
+    ))
+
+    # arbitrage is an option to place an order if there's a profitable limit order
+    # on the opposite side of the order book
+    # if you don't wish to activate it just put some big numbers to profits or min sizes
+    arbitrage_profit_buy: float = Field(0.01, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Arbitrage profit for buy"
+    ))
+    arbitrage_profit_sell: float = Field(0.01, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Arbitrage profit for sell"
+    ))
+    arbitrage_min_size_buy: float = Field(50, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Minimum size for arbitrage buy"
+    ))
+    arbitrage_min_size_sell: float = Field(50, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Minimum size for arbitrage sell"
+    ))
+    taker_trading_mode: str = Field("spot", client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Taker trading mode: 'cross_margin', 'isolated_margin', or 'spot'"
+    ))
+
+    # What amount of asset to keep untouched on the exchange, expressed in QUOTE currency
+    # It means we keep both base and quote assets not less than the amount set here
+    # It's important to keep 1.01*max_order_size on taker if the MARKET BUY order is 
+    # not possible on taker with the amount only
+    # so taker_min_balance_quote = amount_sell*price*0.01
+    taker_min_balance_quote: float = Field(0, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Minimum balance for taker in quote currency"
+    ))
+    maker_min_balance_quote: float = Field(0, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Minimum balance for maker in quote currency"
+    ))
+    total_base_change_notification_limit: float = Field(0.01, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Total base change notification limit"
+    ))
+    previous_speed_limit: float = Field(0.17, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Previous speed limit in percentage per millisecond"
+    ))
+    taker_best_ask_price_coef: float = Field(1.01, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Coefficient for taker best ask price"
+    ))
+    taker_best_bid_price_coef: float = Field(0.99, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Coefficient for taker best bid price"
+    ))
+    # for some exchanges ther's an API resource use counter
+    rate_count_max_limit: int = Field(130, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Max allowed rate limit for the exchange API counter"
+    ))
+
+
 s_decimal_nan = Decimal("NaN")
 
 class CrossMmCustom(ScriptStrategyBase):
 
 ### OPTIONS ###
     # both, buy, sell
-    flow_mode = "buy" #"sell" #"both"
+    # flow_mode = "sell" #"sell" #"both"
 
-    maker = 'kraken_v2' # 'kraken_paper_trade'
-    taker = 'mexc'  #'gate_io_paper_trade'
+    # maker = 'kraken_v2' # 'kraken_paper_trade'
+    # taker = 'mexc'  #'gate_io_paper_trade'
 
     # maker = 'kraken_v2_paper_trade' # 'kraken_paper_trade'
     # taker = 'mexc_paper_trade'  #'gate_io_paper_trade'
 
-    maker_pair = "GNO-USD"
-    taker_pair = "GNO-USDT"
+    # maker_pair = "GNO-USD"
+    # taker_pair = "GNO-USDT"
 
     #round up to this value in best price calculations from taker asks bids
-    order_price_precision = 2
-    order_base_precision = 2
+    # order_price_precision = 2
+    # order_base_precision = 2
 
-    #in milliseconds, delay after which to check for unprocessed maker orders
-    trade_timestamp_delay = 10
 
-    maker_fee = 0.0025
-    taker_fee = 0.0002 #0.001 #0.00084
+    # maker_fee = 0.0025
+    # taker_fee = 0.0002 #0.001 #0.00084
 
     ###### PROFIT in fractions, 0.001 = 0.1% #######
     # maker fee can be added here
-    min_profit_sell = -0.006 #0.0005
-    min_profit_buy = -0.005 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
+    # min_profit_sell = 0.02 #0.0005
+    # min_profit_buy = 0.02 #-0.01 #0.001 #0.00085 #was 0.0005 on 06.05.21
 
     ##### DUST VOLUME ##### in base asset units
-    dust_vol_sell = 0.1 
-    dust_vol_buy = 0.1
+    # dust_vol_sell = 0.1 
+    # dust_vol_buy = 0.1
     #####             ##### 
 
     # in quote currency. This setting can be used to put the order with THE SAME
     # PRICE as the current best order. Just increase the accuracy by 10 times
     # compared to the max accuracy of the base asset on maker exchange
     # For example, if min step is 1e-8, put 1e-9
-    order_price_step_sell = 0.2 #9.8e-9 #1e-9
-    order_price_step_buy = 0.2
+    # order_price_step_sell = 0.2 #9.8e-9 #1e-9
+    # order_price_step_buy = 0.2
 
     # this is the max allowed distance up from the dust price
     # if the order price stays within the distance, it's not edited
@@ -85,140 +291,93 @@ class CrossMmCustom(ScriptStrategyBase):
     # if it's too high the order may hang at the top of the order book 
     # for longer periods even if the competitors with high volumes
     # remove their orders from the top
-    order_price_safe_distance_sell = 0.3 #0.8
-    order_price_safe_distance_buy = 0.3 #1
+    # order_price_safe_distance_sell = 0.3 #0.8
+    # order_price_safe_distance_buy = 0.3 #1
 
     # if we have to put the order close to the hedge price 
     # this is the distance from the hedge price we put it to
-    hedge_price_step_sell = 0.2
-    hedge_price_step_buy = 0.1
+    # hedge_price_step_sell = 0.2
+    # hedge_price_step_buy = 0.1
 
     # if the hedge price is out of the volume window, the order price will
     # be kept within this distance from the hedge price
-    hedge_price_safe_distance_sell = 1
-    hedge_price_safe_distance_buy = 0.5
+    # hedge_price_safe_distance_sell = 1
+    # hedge_price_safe_distance_buy = 0.5
 
-    maker_order_book_depth = 30
+    # maker_order_book_depth = 30
     # possible options are:
     # - 'default'
     # - 'keep_tick_level'
 
     # strategy = 'keep_tick_level'
-    strategy = 'default'
+    # strategy = 'default'
 
     # at what level to keep the order at maker, starting from 1
-    keep_tick_number_buy = 2
-    keep_tick_number_sell = 2
+    # keep_tick_number_buy = 2
+    # keep_tick_number_sell = 2
 
 
     # in adaptive mode the below values are used as MAXIMAL order size (Base asset)
-    amount_sell = 0.1 #0.00025 #0.0003 # 0.00105 #Base asset
-    amount_buy = 0.1 #0.00026 #0.00028  # 0.00105 #Base asset
+    # amount_sell = 0.1 #0.00025 #0.0003 # 0.00105 #Base asset
+    # amount_buy = 0.1 #0.00026 #0.00028  # 0.00105 #Base asset
 
     #minimal order amount nominated in quote asset
-    min_notional_maker = 5
-    min_notional_taker = 5
+    # min_notional_maker = 5
+    # min_notional_taker = 5
 
-    #Adaptive order size mode. If enabled, the order amount depends on the wallet available aseets
-    advaptive_order_amount_mode = 1 # 1 - enabled, 0 - disabled
     # adaptive order amount in fraction of the max available asset volume in the wallet
-    adaptive_amount_sell_fraction = 1
-    adaptive_amount_buy_fraction = 1
+    # adaptive_amount_sell_fraction = 1
+    # adaptive_amount_buy_fraction = 1
 
-    low_balance_duration = 1800
+    # forget_time = 3600
 
-    forget_time = 3600
-
-    base_precision_for_output = 4
-    quote_precision_for_output = 2
+    # base_precision_for_output = 4
+    # quote_precision_for_output = 2
 
     #if exchange supports edit order we can use this feature. Should be 0 or 1
-    edit_order_mode = 1
-
-    # how many levels to fetch. For default value just comment this line
-    taker_order_book_depth = 10 # can be 20 or 100 for kucoin
-    # in qoute currency, order size for the correct profits calculation
-    taker_volume_depth_for_best_ask_bid = 2800
+    # edit_order_mode = 1
 
     # key is the number of seconds for a measuring timeframe, value is the limit in % per min
-    price_speed_limits = {'previous':6.5, 4:4.9, 8:3.1, 16:2.16, 32:1.25}
+    # price_speed_limits = {'previous':6.5, 4:4.9, 8:3.1, 16:2.16, 32:1.25}
     #price_speed_limits = {'previous':1.0, 4:1.6, 8:1.8, 16:0.7, 32:0.1}
 
     #stop_trading_mode_active_timeframe = 30000
     # arbitrage is an option to place an order if there's a profitable limit order
     # on the opposite side of the order book
     # if you don't wish to activate it just put some big numbers to profits or min sizes
-    arbitrage_profit_buy = 0.01#0.002
-    arbitrage_profit_sell = 0.01#0.002
-    arbitrage_min_size_buy = 50
-    arbitrage_min_size_sell = 50
+    # arbitrage_profit_buy = 0.01#0.002
+    # arbitrage_profit_sell = 0.01#0.002
+    # arbitrage_min_size_buy = 50
+    # arbitrage_min_size_sell = 50
 
     # "cross_margin", "isolated_margin", or "spot". The default is "spot"
-    taker_trading_mode = "spot"
-
-    # what part of the taker asset to take to limit the order size in adaptive mode
-    # not mandatory. The default value is set in the main code
-    taker_max_order_size_fraction = 1
+    # taker_trading_mode = "spot"
 
     # what amount of asset to keep untouched on the exchange, expressed in QUOTE currency
     # it means we keep both base and quote assets not less than the amount set here
     # It's important to keep 1.01*max_order_size on taker if the MARKET BUY order is 
     # not possible on taker with the amount only
     # so taker_min_balance_quote = amount_sell*price*0.01
-    taker_min_balance_quote = 0
-    maker_min_balance_quote = 0
+    # taker_min_balance_quote = 0
+    # maker_min_balance_quote = 0
 
-    # what part of max borrowable base amount to take for limiting max order amount
-    max_borrowable_initial_part = 1
-    # how much is allowed to borrow total (during the whole trading session) in base units
-    # this is a hard upper borrowing limit. Optional.
-    # max_borrowable_absolule_base_limit = 1
-
-    total_base_change_notification_limit = 0.01
+    # total_base_change_notification_limit = 0.01
 
     # stop trading speed max limit for previous time value, %/millisec
-    previous_speed_limit = 0.17 #0.001717 # = 10.3 %/min
+    # previous_speed_limit = 0.17 #0.001717 # = 10.3 %/min
 
-    # min delay before any create or arb order after any create or arb order, ms
-    min_delay_before_create_order = 2000
-
-    # how long (milliseconds) to wait for the balances from redis in maker_part
-    maker_part_startup_delay = 25*1000
-
-    # some exchanges return trades timestamps with SECONDS accuracy, not ms
-    # in order to address the issue please set this variable to 1000 if the accuracy is SECONDS
-    # the default value is 1, that is milliseconds accuracy
-    # acceptable values are 1 or 1000
-    taker_exchange_trades_timestamp_accuracy = 1000
-
-    # If you need to calculate the profits for a given period of time
-    # They will be displayed after the bot termination
-    # after the session profits
-    # if the calculation is not needed just comment the following two parameters
-    # the datetime format is "2024-03-01 00:00:00"
-    # the word "now" can be used for current time
-    # the time is in UTC usually
-
-    # profit_calculation_start_date = "2024-03-24 00:00:00"
-    # profit_calculation_end_date = "now"
-
-    # order_amount = 0.1                  # amount for each order
-    # spread_bps = 10                     # bot places maker orders at this spread to taker price
-    # min_spread_bps = 0                  # bot refreshes order if spread is lower than min-spread
-    # slippage_buffer_spread_bps = 100    # buffer applied to limit taker hedging trades on taker exchange
-    # max_order_age = 120                 # bot refreshes orders after this age
-
-    markets = {maker: {maker_pair}, taker: {taker_pair}}
+    # markets = {maker: {maker_pair}, taker: {taker_pair}}
 
     price_source = PriceType.MidPrice
 
-    sell_profit_coef = (1 + taker_fee)/(1 - maker_fee - min_profit_sell)
-    buy_profit_coef = (1 - taker_fee)/(1 + maker_fee + min_profit_buy)
+    # sell_profit_coef = (1 + taker_fee)/(1 - maker_fee - min_profit_sell)
+    # buy_profit_coef = (1 - taker_fee)/(1 + maker_fee + min_profit_buy)
 
     # for placing the taker limit order to make sure it will be completed
     # as a market order.
-    taker_best_ask_price_coef = 1.01
-    taker_best_bid_price_coef = 0.99
+    # taker_best_ask_price_coef = 1.01
+    # taker_best_bid_price_coef = 0.99
+    
     # buy_order_placed = False
     # sell_order_placed = False
     one_order_only = False
@@ -229,12 +388,27 @@ class CrossMmCustom(ScriptStrategyBase):
     one_time_init_was_launched_before = False
 
     # for some exchanges ther's an API resource use counter
-    rate_count_max_limit = 130
+    # rate_count_max_limit = 130
     previously_processed_rate_count_update_timestamp = None
     # start_time: timestamp with milliseconds
     # how_long: pause in milliseconds
     # idle_timer = Timer()
     idle_timers = []
+    
+    @classmethod
+    def init_markets(cls, config: CrossMMCustomConfig):
+        cls.markets = {config.maker: {config.maker_pair}, config.taker: {config.taker_pair}}
+
+    def __init__(self, connectors: Dict[str, ConnectorBase], config: CrossMMCustomConfig):
+        super().__init__(connectors)
+        # Assign all config attributes to self
+        # The following line is added due to the history of development
+        # At first the config file was not used and class variables 
+        # were used instead. So to avoid additional variable names 
+        # replacement in the code the config vars are just copied to self. vars
+        self.__dict__.update(config.__dict__)
+        self.sell_profit_coef = (1 + self.taker_fee)/(1 - self.maker_fee - self.min_profit_sell)
+        self.buy_profit_coef = (1 - self.taker_fee)/(1 + self.maker_fee + self.min_profit_buy)        
 
     # Helper function to disable execution of any routines inside on_tick() 
     # if certain conditions are met
@@ -268,6 +442,8 @@ class CrossMmCustom(ScriptStrategyBase):
             # self.idle_timer.deactivate_if_time_passed()
             self.disable_outdated_timers()
             self.one_time_init()
+
+            # self.logger().info(f"Current flow mode: {self.flow_mode}")
             # self.logger().info("TICK STARTED!!!!!!!!!!!!!!!!!!!!!!!!!!")             
             # self.logger().info(self.connectors[self.taker].trading_rules)
             self.check_active_orders(debug_output=False) 
