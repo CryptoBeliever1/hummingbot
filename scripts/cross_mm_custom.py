@@ -457,13 +457,13 @@ class CrossMmCustom(ScriptStrategyBase):
 
             # k = unknown
 
-            self.calculate_planned_orders_sizes(debug_output=False)
+            self.calculate_planned_orders_sizes(debug_output=True)
 
-            self.calculate_hedge_price(debug_output=False)       
+            self.calculate_hedge_price(debug_output=True)       
 
             self.adjust_orders_sizes(debug_output=False) 
 
-            self.calc_orders_parameters(debug_output=False)
+            self.calc_orders_parameters(debug_output=True)
 
             self.buy_order_flow()
 
@@ -548,8 +548,8 @@ class CrossMmCustom(ScriptStrategyBase):
             return
         if self.active_sell_order is None:
             self.create_new_maker_order(side=TradeType.SELL, debug_output=False)
-        elif self.edit_order_condition(side=TradeType.SELL, debug_output=False):
-            sell_order_edit_result = self.edit_order(order=self.active_sell_order, debug_output=False)
+        elif self.edit_order_condition(side=TradeType.SELL, debug_output=True):
+            sell_order_edit_result = self.edit_order(order=self.active_sell_order, debug_output=True)
             
             if sell_order_edit_result == "cancel":
                 self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
@@ -776,7 +776,7 @@ class CrossMmCustom(ScriptStrategyBase):
             self.do_not_create_sell_order_because_of_bad_parameters = True
         
         if debug_output:
-            self.logger().info(f"self.hedge_price_sell = {self.taker_buy_by_volume_price} * {self.sell_profit_coef}, taker_buy_result.result_price = {taker_buy_result.result_price}")
+            self.logger().info(f"self.hedge_price_sell = {self.taker_buy_by_volume_price} * {self.sell_profit_coef} = {self.hedge_price_sell}, taker_buy_result.result_price = {taker_buy_result.result_price}")
                 
         self.hedge_price_buy = self.taker_sell_by_volume_price * self.buy_profit_coef
 
@@ -885,6 +885,26 @@ class CrossMmCustom(ScriptStrategyBase):
             if debug_output:
                 self.logger().info("There are no active sell orders.")
 
+    def round_to_precision(self, value, precision, rounding_mode='ceil', return_string=True):
+        # Calculate the scaling factor based on the precision
+        scaling_factor = 10 ** precision
+        # Multiply by the scaling factor to shift the decimal places
+        scaled_value = value * scaling_factor
+        
+        if rounding_mode == 'ceil':
+            # Apply math.ceil to get the ceiling integer value
+            rounded_value = math.ceil(scaled_value)
+        elif rounding_mode == 'floor':
+            # Apply math.floor to get the floor integer value
+            rounded_value = math.floor(scaled_value)
+        else:
+            raise ValueError("Invalid rounding_mode. Please use 'ceil' or 'floor'.")
+        
+        # Divide by the scaling factor to shift back to the original number of decimal places
+        result = rounded_value / scaling_factor
+        if return_string:
+            result = str(result)
+        return result
 
     def create_new_maker_order(self, side=TradeType.BUY, debug_output=False):
         if side == TradeType.BUY:
@@ -893,7 +913,8 @@ class CrossMmCustom(ScriptStrategyBase):
                 return
             if not self.order_size_and_price_are_valid(side):
                 return
-            buy_price = Decimal(self.planned_order_price_buy)
+            buy_price = Decimal(
+                self.round_to_precision(self.planned_order_price_buy, self.order_price_precision, rounding_mode='floor'))
 
             buy_order = OrderCandidate(trading_pair=self.maker_pair, is_maker=True, order_type=OrderType.LIMIT,
                                    order_side=TradeType.BUY, amount=Decimal(self.order_size_buy), price=buy_price)
@@ -906,8 +927,11 @@ class CrossMmCustom(ScriptStrategyBase):
                 return                        
             if not self.order_size_and_price_are_valid(side):
                 return
-            sell_price = Decimal(self.planned_order_price_sell)
-
+            
+            self.logger().info(f"sell price before placing order: {self.planned_order_price_sell}")
+            sell_price = Decimal(
+                self.round_to_precision(self.planned_order_price_sell, self.order_price_precision, rounding_mode='ceil'))
+            self.logger().info(f"sell price after converting to Decimal: {sell_price}")
             sell_order = OrderCandidate(trading_pair=self.maker_pair, is_maker=True, order_type=OrderType.LIMIT,
                                     order_side=TradeType.SELL, amount=Decimal(self.order_size_sell), price=sell_price)
             # sell_order_adjusted = self.adjust_proposal_to_budget(self.maker, [sell_order])
