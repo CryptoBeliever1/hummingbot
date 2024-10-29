@@ -1,9 +1,11 @@
 import asyncio
 import math
 import os
+import re
 import sys
 import time
 import traceback
+from collections import deque
 from concurrent.futures import Future
 from decimal import Decimal
 from typing import Dict
@@ -20,6 +22,7 @@ from hummingbot.core.data_type.in_flight_order import OrderState
 from hummingbot.core.data_type.order_candidate import OrderCandidate
 from hummingbot.core.event.events import (
     BuyOrderCreatedEvent,
+    MarketOrderFailureEvent,
     OrderCancelledEvent,
     OrderFilledEvent,
     OrderType,
@@ -239,7 +242,16 @@ class CrossMMCustomConfig(BaseClientModel):
     rate_count_max_limit: int = Field(130, client_data=ClientFieldData(
         prompt_on_new=False, prompt=lambda mi: "Max allowed rate limit for the exchange API counter"
     ))
-
+    # milliseconds
+    after_order_is_filled_delay: int = Field(2500, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Delay after maker order is filled, in milliseconds"
+    ))
+    after_failed_order_delay: int = Field(30000, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Delay after maker order submission fail, in milliseconds"
+    ))
+    after_rate_conter_limit_reached_delay: int = Field(30000, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Delay after rate counter limit reached, in milliseconds"
+    ))
 
 s_decimal_nan = Decimal("NaN")
 
@@ -448,6 +460,8 @@ class CrossMmCustom(ScriptStrategyBase):
             # self.logger().info(self.connectors[self.taker].trading_rules)
             self.check_active_orders(debug_output=False) 
 
+            # self.show_tracked_orders()
+
             self.check_rate_count()
             # self.connectors[self.maker].open_orders()
 
@@ -457,13 +471,13 @@ class CrossMmCustom(ScriptStrategyBase):
 
             # k = unknown
 
-            self.calculate_planned_orders_sizes(debug_output=True)
+            self.calculate_planned_orders_sizes(debug_output=False)
 
-            self.calculate_hedge_price(debug_output=True)       
+            self.calculate_hedge_price(debug_output=False)       
 
             self.adjust_orders_sizes(debug_output=False) 
 
-            self.calc_orders_parameters(debug_output=True)
+            self.calc_orders_parameters(debug_output=False)
 
             self.buy_order_flow()
 
@@ -548,8 +562,8 @@ class CrossMmCustom(ScriptStrategyBase):
             return
         if self.active_sell_order is None:
             self.create_new_maker_order(side=TradeType.SELL, debug_output=False)
-        elif self.edit_order_condition(side=TradeType.SELL, debug_output=True):
-            sell_order_edit_result = self.edit_order(order=self.active_sell_order, debug_output=True)
+        elif self.edit_order_condition(side=TradeType.SELL, debug_output=False):
+            sell_order_edit_result = self.edit_order(order=self.active_sell_order, debug_output=False)
             
             if sell_order_edit_result == "cancel":
                 self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
@@ -572,6 +586,9 @@ class CrossMmCustom(ScriptStrategyBase):
             # instance_id = hummingbot.instance_id
             instance_id = self.get_instance_id()
             self.logger().info(f"Hummingbot Instance ID: {instance_id}")
+
+            # self.logger().info(f"strategy_file_name: {self.hummingbot.strategy_file_name}")
+            # self.logger().info(f"strategy_name: {self.hummingbot.strategy_name}")
             in_flight_orders = self.connectors[self.maker].in_flight_orders
             # self.logger().info(f"######### In Flight Orders: {in_flight_orders} ########")
             
@@ -928,10 +945,10 @@ class CrossMmCustom(ScriptStrategyBase):
             if not self.order_size_and_price_are_valid(side):
                 return
             
-            self.logger().info(f"sell price before placing order: {self.planned_order_price_sell}")
+            # self.logger().info(f"sell price before placing order: {self.planned_order_price_sell}")
             sell_price = Decimal(
                 self.round_to_precision(self.planned_order_price_sell, self.order_price_precision, rounding_mode='ceil'))
-            self.logger().info(f"sell price after converting to Decimal: {sell_price}")
+            # self.logger().info(f"sell price after converting to Decimal: {sell_price}")
             sell_order = OrderCandidate(trading_pair=self.maker_pair, is_maker=True, order_type=OrderType.LIMIT,
                                     order_side=TradeType.SELL, amount=Decimal(self.order_size_sell), price=sell_price)
             # sell_order_adjusted = self.adjust_proposal_to_budget(self.maker, [sell_order])
@@ -1146,10 +1163,19 @@ class CrossMmCustom(ScriptStrategyBase):
             # active_order_price_is_between_the_dust_price_and_one_step_above_price = (
             #     self.active_sell_order.price <= self.dust_vol_limit_price_sell and 
             #     self.active_sell_order.price >= (self.active_sell_order.price - self.order_price_safe_distance_buy))
+            active_sell_price_float = float(self.active_sell_order.price)
 
             active_order_price_is_between_the_dust_price_and_one_step_above_price = (
-                self.active_sell_order.price <= self.dust_vol_limit_price_sell and 
-                self.active_sell_order.price >= (self.dust_vol_limit_price_sell - self.order_price_safe_distance_sell))
+                active_sell_price_float <= self.dust_vol_limit_price_sell and 
+                active_sell_price_float >= (self.dust_vol_limit_price_sell - self.order_price_safe_distance_sell))
+            if debug_output:
+                self.logger().info(f"active_sell_order.price: {active_sell_price_float} (type: {type(active_sell_price_float)}), "
+      f"dust_vol_limit_price_sell: {self.dust_vol_limit_price_sell} (type: {type(self.dust_vol_limit_price_sell)}), "
+      f"active_sell_price_float <= self.dust_vol_limit_price_sell is: {active_sell_price_float <= self.dust_vol_limit_price_sell},"
+      f"order_price_safe_distance_sell: {self.order_price_safe_distance_sell}, "
+      f"(dust_vol_limit_price_sell - order_price_safe_distance_sell): {self.dust_vol_limit_price_sell - self.order_price_safe_distance_sell}, "
+      f"active_sell_price_float >= (self.dust_vol_limit_price_sell - self.order_price_safe_distance_sell) is: {active_sell_price_float >= (self.dust_vol_limit_price_sell - self.order_price_safe_distance_sell)}"
+      f"Condition result: {active_order_price_is_between_the_dust_price_and_one_step_above_price}")
 
             # active order price is between the hedge and one step lower (under the hedge condition is met on the first step - must be profitable)
             active_order_price_is_above_one_step_lower_the_hedge = (float(self.active_sell_order.price) <= 
@@ -1251,6 +1277,49 @@ class CrossMmCustom(ScriptStrategyBase):
             and self.sell_order_client_id_to_edit_in_current_tick_cycle == event.order_id):
             self.create_new_maker_order(side=TradeType.SELL)
 
+    def did_fail_order(self, event: MarketOrderFailureEvent):
+        # self.logger().info(f"Tracked order {event.order_id} FAILED catched event")
+        delay = self.after_failed_order_delay
+        for order in self.get_active_orders(connector_name=self.maker):        
+            if order.client_order_id == event.order_id:
+                self.idle_timers.append(Timer(name="failed_order_idle_timer", duration=delay))
+                
+                notif_text = f"Maker order {order.client_order_id} creation failed, going idle for {delay/1000} seconds"
+                self.telegram_utils.send_unformatted_message(notif_text)
+                self.telegram_utils.send_unformatted_message(self.get_latest_exception_traceback())
+
+        
+        # orders_from_all_connectors = self.order_tracker.tracked_limit_orders
+        # connector = self.connectors[self.maker]
+        # limit_orders = [o[1] for o in orders_from_all_connectors if o[0] == connector]
+
+        # for order in limit_orders:
+        #     self.logger().info(f"Active orders: {order.client_order_id}")
+        #     if order.client_order_id == event.order_id:
+        #         self.logger().info(f"Tracked order {event.order_id} FAILED catch event") 
+
+    def get_latest_exception_traceback(self):
+        # Get the latest exception information
+
+        config_name = self.hummingbot.strategy_file_name.split(".")[0]
+        # config_name = f"conf_{os.path.splitext(self.script_file_name)[0]}"
+        # self.logger().info(f"CONFIG NAME: {config_name}")
+        log_file = self.find_log_file(config_name)
+        latest_error_message = self.extract_latest_full_error_message(log_file)
+        return latest_error_message
+
+    def show_tracked_orders(self):
+        
+        for order in self.get_active_orders(connector_name=self.maker):        
+            self.logger().info(f"Active orders: {order.client_order_id}")
+
+        # self.logger().info(f"Showing all tracked orders.......")
+        # orders_from_all_connectors = self.order_tracker.tracked_limit_orders
+        # connector = self.connectors[self.maker]
+        # limit_orders = [o[1] for o in orders_from_all_connectors if o[0] == connector]
+        
+        # for order in orders_from_all_connectors:
+        #     self.logger().info(f"Tracked orders: {order.client_order_id}") 
 
 
     def is_active_maker_order(self, event: OrderFilledEvent):
@@ -1417,7 +1486,7 @@ class CrossMmCustom(ScriptStrategyBase):
             # Also making a small delay to wait for the balances update
             # so the new orders could be added correctly
             self.custom_cancel_all_orders()
-            durtaion = 2500
+            durtaion = self.after_order_is_filled_delay
             # self.logger().info(f"Starting timer 'after_order_is_filled_timer' for {durtaion} ms")
             self.idle_timers.append(Timer(name="after_order_is_filled_timer", duration=durtaion))
                   
@@ -1470,7 +1539,7 @@ class CrossMmCustom(ScriptStrategyBase):
         #     # if the current 'rate_count' value was processed before
         #     if rate_count_timestamp <= self.previously_processed_rate_count_update_timestamp:
         #         return
-        delay = 5000
+        delay = self.after_rate_conter_limit_reached_delay
 
         # debug_string = (f"Evaluating: ({rate_count_timestamp} + {delay} - 2000) "
         #         f"< ({self.connectors[self.maker].current_timestamp} * 1000 = {self.connectors[self.maker].current_timestamp * 1000})")
@@ -1673,4 +1742,43 @@ class CrossMmCustom(ScriptStrategyBase):
         self.logger().error(cleaned_string, exc_info=True)
         if send_notification:
             exc_text += "\n" + "".join(traceback.format_exception(*exc_info))           
-            self.telegram_utils.send_unformatted_message(exc_text)        
+            self.telegram_utils.send_unformatted_message(exc_text)
+
+    def find_log_file(self, config_name):
+        # Construct the log file name pattern based on the config_name variable
+        log_file_pattern = rf'^logs_{re.escape(config_name)}\.log$'
+        # Get the directory of the current file
+        current_directory = os.path.dirname(os.path.abspath(__file__))
+
+        # Go one level up
+        parent_directory = os.path.dirname(current_directory)
+
+        # Go to the 'logs' directory in the parent
+        log_dir = os.path.join(parent_directory, 'logs')
+        
+        # Find the latest matching log file in the specified directory
+        log_files = [f for f in os.listdir(log_dir) if re.match(log_file_pattern, f)]
+        latest_file = max(log_files, key=lambda x: os.path.getctime(os.path.join(log_dir, x))) if log_files else None
+        return os.path.join(log_dir, latest_file) if latest_file else None
+
+    def extract_latest_full_error_message(self, log_file):
+        if not log_file:
+            return "Log file not found."
+
+        # Pattern to match the entire error message block, including the traceback
+        error_block_pattern = re.compile(r"(Traceback \(most recent call last\):[\s\S]+?(?=\n\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}|\Z))")
+        latest_error_message = None
+
+        with open(log_file, 'r') as f:
+            # Read the file from the end using a deque to handle large files efficiently
+            lines = deque(f, maxlen=10000)  # Adjust maxlen based on the expected size of error blocks
+            log_content = ''.join(lines)
+            
+            # Search for the error block pattern in the reversed content
+            error_blocks = re.findall(error_block_pattern, log_content)
+
+            # Get the first occurrence from the end (latest error block)
+            if error_blocks:
+                latest_error_message = error_blocks[-1]
+
+        return f"{latest_error_message}" or "No error message with traceback found in the log."                    
