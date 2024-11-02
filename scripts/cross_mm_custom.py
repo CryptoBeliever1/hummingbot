@@ -6,7 +6,7 @@ import sys
 import time
 import traceback
 from collections import deque
-from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from typing import Dict
 
@@ -252,6 +252,19 @@ class CrossMMCustomConfig(BaseClientModel):
     after_rate_conter_limit_reached_delay: int = Field(30000, client_data=ClientFieldData(
         prompt_on_new=False, prompt=lambda mi: "Delay after rate counter limit reached, in milliseconds"
     ))
+    one_order_only: bool = Field(False, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Stop after one trade is executed"
+    ))
+    debug_output_control: dict = Field(
+        {'check_active_orders': False, 
+         'calculate_planned_orders_sizes': False, 
+         'calculate_hedge_price': False, 
+         'adjust_orders_sizes': False, 
+         'calc_orders_parameters': False,
+         }, 
+         client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Debug output from different parts of the code"
+    ))
 
 s_decimal_nan = Decimal("NaN")
 
@@ -392,7 +405,7 @@ class CrossMmCustom(ScriptStrategyBase):
     
     # buy_order_placed = False
     # sell_order_placed = False
-    one_order_only = False
+    # one_order_only = False
     exit_bot_flag = False
     start_time = None
     idle_mode = False
@@ -420,7 +433,8 @@ class CrossMmCustom(ScriptStrategyBase):
         # replacement in the code the config vars are just copied to self. vars
         self.__dict__.update(config.__dict__)
         self.sell_profit_coef = (1 + self.taker_fee)/(1 - self.maker_fee - self.min_profit_sell)
-        self.buy_profit_coef = (1 - self.taker_fee)/(1 + self.maker_fee + self.min_profit_buy)        
+        self.buy_profit_coef = (1 - self.taker_fee)/(1 + self.maker_fee + self.min_profit_buy)
+        self._async_executor = ThreadPoolExecutor(max_workers=1)       
 
     # Helper function to disable execution of any routines inside on_tick() 
     # if certain conditions are met
@@ -436,6 +450,7 @@ class CrossMmCustom(ScriptStrategyBase):
         Returns True if any of them is true'''
         for timer in self.idle_timers:
             if timer.timer_is_active:
+                # self.logger().info(f"The idle timer {timer.name} is active")
                 return True
         return False    
 
@@ -627,12 +642,17 @@ class CrossMmCustom(ScriptStrategyBase):
 
             self.starting_base_total = self.base_total
             self.starting_quote_total = self.quote_total
-    
+
+            # loop = asyncio.get_event_loop()
+            # asyncio.run_coroutine_threadsafe(
+            #     self._run_async_update_balances(7000),
+            #     loop
+            # )
             # self.logger().info(f"Notifiers: {self.hummingbot.notifiers}")
 
             
 
-            telegram_string = self.telegram_utils.bot_started_string(version, self.strategy, self.maker_fee, self.taker_fee)
+            telegram_string = self.telegram_utils.bot_started_string(version, self.strategy, self.maker_fee, self.taker_fee, self.flow_mode)
             self.hummingbot.notify(telegram_string)
             self.logger().info(telegram_string)
 
@@ -737,6 +757,8 @@ class CrossMmCustom(ScriptStrategyBase):
         if self.go_passive():
             return
         
+        debug_output = self.debug_output_value_for_this_function(debug_output, function_name='calculate_planned_orders_sizes')
+
         koef_for_calculating_amounts = (1 - self.maker_fee - self.taker_fee - self.min_profit_buy)
         # price_for_calc_min_sell_amount = self.connectors[self.maker].get_price_by_type(self.maker_pair, PriceType.BestAsk) * (1 - self.maker_fee)
         price_for_calc_min_buy_amount = float(self.connectors[self.maker].get_price_by_type(self.maker_pair, PriceType.BestBid)) * koef_for_calculating_amounts
@@ -769,7 +791,9 @@ class CrossMmCustom(ScriptStrategyBase):
 
     def calculate_hedge_price(self, debug_output=False) -> Decimal:
         if self.go_passive():
-            return        
+            return
+        
+        debug_output = self.debug_output_value_for_this_function(debug_output, function_name='calculate_hedge_price')        
         # ref_price = self.connectors[self.taker].get_price_by_type(self.taker_pair, self.price_source)
         
         # self.taker_ref_order_amount = (self.taker_volume_depth_for_best_ask_bid / ref_price)
@@ -826,13 +850,22 @@ class CrossMmCustom(ScriptStrategyBase):
         if self.go_passive():
             return
 
+        debug_output = self.debug_output_value_for_this_function(debug_output, function_name='adjust_orders_sizes')
+
         maker_untouched_amount = self.maker_min_balance_quote / self.hedge_price_buy
         taker_untouched_amount = self.taker_min_balance_quote / self.hedge_price_buy
 
+        maker_available_minus_untouched = self.maker_base_free * self.adaptive_amount_sell_fraction - maker_untouched_amount
+        
+        taker_available_minus_untouched = (self.taker_quote_free - self.taker_min_balance_quote) / self.taker_buy_by_volume_price
+
+        taker_available_with_higher_buy_price = self.taker_quote_free / (self.taker_buy_by_volume_price * self.taker_best_ask_price_coef)
+
         sell_values = [
-            (self.maker_base_free * self.adaptive_amount_sell_fraction - maker_untouched_amount), 
+            maker_available_minus_untouched, 
             self.amount_sell,
-            (self.taker_quote_free - self.taker_min_balance_quote) / self.hedge_price_sell  
+            taker_available_minus_untouched,
+            taker_available_with_higher_buy_price,  
         ]
         
         self.order_size_sell = min(sell_values)
@@ -840,6 +873,7 @@ class CrossMmCustom(ScriptStrategyBase):
         if debug_output:
             self.logger().info(f"sell_values: {sell_values}")
             self.logger().info(f"taker_quote_free: {self.taker_quote_free}, taker_min_balance_quote: {self.taker_min_balance_quote}, hedge_price_sell: {self.hedge_price_sell}")
+            self.logger().info(f"taker_base_free: {self.taker_base_free}")
             self.logger().info(f"order_size_sell: {self.order_size_sell}")
 
         buy_values = [
@@ -860,6 +894,9 @@ class CrossMmCustom(ScriptStrategyBase):
     def check_active_orders(self, debug_output=False):
         if self.go_passive():
             return
+        
+        debug_output = self.debug_output_value_for_this_function(debug_output, function_name='check_active_orders')
+
         self.active_limit_orders = self.get_active_orders(connector_name=self.maker)
 
         # self.logger().info(f"######### Active Orders: {self.active_limit_orders} ########")
@@ -934,7 +971,7 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.round_to_precision(self.planned_order_price_buy, self.order_price_precision, rounding_mode='floor'))
 
             buy_order = OrderCandidate(trading_pair=self.maker_pair, is_maker=True, order_type=OrderType.LIMIT,
-                                   order_side=TradeType.BUY, amount=Decimal(self.order_size_buy), price=buy_price)
+                                   order_side=TradeType.BUY, amount=Decimal(str(self.order_size_buy)), price=buy_price)
             # buy_order_adjusted = self.adjust_proposal_to_budget(self.maker, [buy_order])
             if self.check_order_min_size_before_placing(self.maker, buy_order, notif_output=False):
                 self.place_order(self.maker, buy_order)
@@ -950,7 +987,7 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.round_to_precision(self.planned_order_price_sell, self.order_price_precision, rounding_mode='ceil'))
             # self.logger().info(f"sell price after converting to Decimal: {sell_price}")
             sell_order = OrderCandidate(trading_pair=self.maker_pair, is_maker=True, order_type=OrderType.LIMIT,
-                                    order_side=TradeType.SELL, amount=Decimal(self.order_size_sell), price=sell_price)
+                                    order_side=TradeType.SELL, amount=Decimal(str(self.order_size_sell)), price=sell_price)
             # sell_order_adjusted = self.adjust_proposal_to_budget(self.maker, [sell_order])
             if self.check_order_min_size_before_placing(self.maker, sell_order, notif_output=False):
                 self.place_order(self.maker, sell_order)
@@ -1011,7 +1048,10 @@ class CrossMmCustom(ScriptStrategyBase):
 
     def calc_orders_parameters(self, debug_output=False):
         if self.go_passive():
-            return        
+            return
+
+        debug_output = self.debug_output_value_for_this_function(debug_output, function_name='calc_orders_parameters')    
+
         self.get_order_book_dict(self.maker, self.maker_pair, self.maker_order_book_depth)
         
         # if debug_output:
@@ -1393,9 +1433,9 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.logger().info("One order only! No more orders should be placed.")
                 self.exit_bot_flag = True
 
-            taker_sell_result = self.taker_sell_by_volume_price
+            taker_sell_result = str(self.taker_sell_by_volume_price)
             
-            sell_price_with_slippage = Decimal(taker_sell_result) * Decimal(self.taker_best_bid_price_coef)
+            sell_price_with_slippage = Decimal(taker_sell_result) * Decimal(str(self.taker_best_bid_price_coef))
 
             taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
             if taker_rules:
@@ -1406,8 +1446,8 @@ class CrossMmCustom(ScriptStrategyBase):
             taker_sell_order_amount = event.amount
 
             # check if there's enough base balance on taker
-            if event.amount > self.taker_base_free:
-                taker_sell_order_amount = self.taker_base_free
+            if event.amount > Decimal(str(self.taker_base_free)):
+                taker_sell_order_amount = Decimal(str(self.taker_base_free))
                 self.logger().info(f"Correcting SELL LIMIT amount on taker to {taker_sell_order_amount} because the quote balance on taker is not enough")
 
 
@@ -1444,9 +1484,9 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.logger().info("One order only! No more orders should be placed.")
                 self.exit_bot_flag = True
 
-            taker_buy_result = self.taker_buy_by_volume_price
+            taker_buy_result = str(self.taker_buy_by_volume_price)
             
-            buy_price_with_slippage = Decimal(taker_buy_result) * Decimal(self.taker_best_ask_price_coef)
+            buy_price_with_slippage = Decimal(taker_buy_result) * Decimal(str(self.taker_best_ask_price_coef))
 
             taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
             if taker_rules:
@@ -1458,9 +1498,10 @@ class CrossMmCustom(ScriptStrategyBase):
 
 
             # check if there's enough quote balance on taker
-            if Decimal(self.taker_quote_free) < Decimal(event.amount) * Decimal(buy_price_with_slippage):
+            if Decimal(str(self.taker_quote_free)) < Decimal(event.amount) * Decimal(buy_price_with_slippage):
                 
-                taker_buy_order_amount = (Decimal(self.taker_quote_free - self.min_notional_taker) / Decimal(buy_price_with_slippage)                
+                taker_buy_order_amount = (
+                    Decimal(str(self.taker_quote_free - self.taker_min_balance_quote)) / Decimal(buy_price_with_slippage)
                 )
                 self.logger().info(f"Correcting BUY LIMIT amount on taker to {taker_buy_order_amount} because the quote balance on taker is not enough")
 
@@ -1488,6 +1529,45 @@ class CrossMmCustom(ScriptStrategyBase):
             self.custom_cancel_all_orders()
             durtaion = self.after_order_is_filled_delay
             # self.logger().info(f"Starting timer 'after_order_is_filled_timer' for {durtaion} ms")
+
+            # Mexc exchange sends wrong quote balance after the sell order
+            # through a websocket. That is why the balance should be updated forcefully
+            # through a REST API. The first delay is started at the moment 
+            # of the filled maker order. The first delay
+            # is needed for the taker order to be fully filled and taker websocket messages to be 
+            # sent. The second delay is needed to have enough time to get
+            # the taker balance with a rest api.
+            # The second delay will be equal to 
+            # self.after_order_is_filled_delay - balance_rest_api_request_delay
+            #
+   
+            if self.taker == 'mexc' and event.trade_type == TradeType.BUY:
+
+                duration_ratio = 0.6
+                # every calculation is in milliseconds
+                balance_rest_api_request_delay = duration_ratio * self.after_order_is_filled_delay
+
+                # The taker order is sent and processed fully,
+                # all taker balances updated in less than 700 ms
+                # Just to make sure the balances are updated 
+                # before they are requested the delay is set
+                # to not less than 1000 ms
+                min_delay = 1200
+                if balance_rest_api_request_delay < min_delay:
+                    balance_rest_api_request_delay = min_delay                 
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    # Handle the case where no event loop is running
+                    # For example, you might create a new event loop or log an error
+                    self.logger().error("No running event loop found while trying to update MEXC balances")                
+                else:
+                    asyncio.run_coroutine_threadsafe(
+                        self._run_async_update_balances(balance_rest_api_request_delay),
+                        loop
+                    )
+                # durtaion = int(self.after_order_is_filled_delay * (1 - duration_ratio))
+
             self.idle_timers.append(Timer(name="after_order_is_filled_timer", duration=durtaion))
                   
         
@@ -1781,4 +1861,35 @@ class CrossMmCustom(ScriptStrategyBase):
             if error_blocks:
                 latest_error_message = error_blocks[-1]
 
-        return f"{latest_error_message}" or "No error message with traceback found in the log."                    
+        return f"{latest_error_message}" or "No error message with traceback found in the log."
+
+    async def _run_async_update_balances(self, sleep_duration=0):
+        """
+        Async method to run the balance update
+        sleep_duration is in milliseconds
+        """
+        connector_name = self.taker
+        await asyncio.sleep(sleep_duration/1000)
+        try:
+            # Run with a specific 10-second timeout
+            await asyncio.wait_for(
+                self.connectors[connector_name]._update_balances(), 
+                timeout=10.0
+            )
+            self.logger().info(f"Connector balances on {connector_name} updated successfully")
+        
+        except asyncio.TimeoutError:
+            self.logger().error(f"Balance update timed out after 10 seconds for {connector_name}")
+        
+        except Exception as e:
+            self.logger().error(f"Error updating balances on {connector_name}: {e}")
+
+
+    def debug_output_value_for_this_function(self, debug_output: bool, function_name: str=None):
+        output_value = debug_output
+        if not hasattr(self, 'debug_output_control'):
+            return output_value
+        if function_name in self.debug_output_control:
+            output_value = self.debug_output_control[function_name]
+        return output_value    
+                       

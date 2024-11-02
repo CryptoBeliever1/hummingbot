@@ -99,6 +99,6 @@ class TelegramUtils():
         formatted_amount = f"{amount:,.{self.quote_precision_for_output}f}"
         return formatted_amount    
     
-    def bot_started_string(self, version, strategy, maker_fee, taker_fee):
-        output_string = f"Bot Started. Version: {version}\nStrategy: {strategy}\nMaker fee: {maker_fee * 100:.{10}g}%, Taker fee: {taker_fee * 100:.{10}g}%"
+    def bot_started_string(self, version, strategy, maker_fee, taker_fee, trading_side=""):
+        output_string = f"Bot Started. Version: {version}\nStrategy: {strategy}\nTrading Side(s): {trading_side}\nMaker fee: {maker_fee * 100:.{10}g}%, Taker fee: {taker_fee * 100:.{10}g}%"
         return self.format_string(output_string, True)
