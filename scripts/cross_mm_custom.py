@@ -729,12 +729,20 @@ class CrossMmCustom(ScriptStrategyBase):
         # self.connectors[self.maker].update_balances()
         self.get_balances()
 
+        # We need to adjust the available balance for the amount(size) of an active order
+        # Because if there's an active order the available balance should include it
+        # Because one active order is allowed only
         if self.maker_quote_total is not None and self.maker_quote_free is not None:
             if self.maker_quote_free < self.maker_quote_total and self.active_buy_order:
                 self.maker_quote_free = min((self.maker_quote_free + 
                                          float(self.active_buy_order.price) * float(self.active_buy_order.quantity)),
                                          self.maker_quote_total)
-
+        
+        if self.maker_base_total is not None and self.maker_base_free is not None:
+            if self.maker_base_free < self.maker_base_total and self.active_sell_order:
+                self.maker_base_free = min((self.maker_base_free + 
+                                         float(self.active_sell_order.quantity)),
+                                         self.maker_base_total)
         # market, trading_pair, base_asset, quote_asset = self.get_market_trading_pair_tuples()[0]
         # self.maker_base_free = float(market.get_available_balance(self.maker_base_symbol))
         # self.maker_quote_free = float(market.get_available_balance(self.maker_quote_symbol))
