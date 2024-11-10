@@ -1153,8 +1153,16 @@ class CrossMmCustom(ScriptStrategyBase):
             
             # The below condition is for attaching the order to the DUST VOLUME price
             active_order_price_is_between_the_dust_price_and_one_step_above_price = (
-                self.active_buy_order.price >= self.dust_vol_limit_price_buy and 
-                self.active_buy_order.price <= (self.dust_vol_limit_price_buy + self.order_price_safe_distance_buy))
+                float(self.active_buy_order.price) >= self.dust_vol_limit_price_buy and 
+                float(self.active_buy_order.price) <= (self.dust_vol_limit_price_buy + self.order_price_safe_distance_buy))
+
+    #         if debug_output:
+    #             self.logger().info(f"active_buy_order.price: {self.active_buy_order.price} ({type(self.active_buy_order.price).__name__}), "
+    #   f"dust_vol_limit_price_buy: {self.dust_vol_limit_price_buy} ({type(self.dust_vol_limit_price_buy).__name__}), "
+    #   f"order_price_safe_distance_buy: {self.order_price_safe_distance_buy} ({type(self.order_price_safe_distance_buy).__name__}), "
+    #   f"active_order_price_is_between_the_dust_price_and_one_step_above_price: {active_order_price_is_between_the_dust_price_and_one_step_above_price} "
+    #   f"({type(active_order_price_is_between_the_dust_price_and_one_step_above_price).__name__})")
+
 
             # active order price is between the hedge and one step lower (under the hedge condition is met on the first step - must be profitable)
             active_order_price_is_above_one_step_lower_the_hedge = (float(self.active_buy_order.price) >= 
