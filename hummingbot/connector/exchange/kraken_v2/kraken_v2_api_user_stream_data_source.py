@@ -84,7 +84,7 @@ class KrakenV2APIUserStreamDataSource(UserStreamTrackerDataSource):
                     "token": self._current_auth_token,
                     "snap_orders": True,
                     "snap_trades": False,
-                    "order_status": False,
+                    "order_status": True,
                     "ratecounter": True
                 }
             }

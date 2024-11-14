@@ -521,7 +521,7 @@ class KrakenV2Exchange(ExchangePyBase):
             # self.logger().info(f"complex_event_message: {complex_event_message}, type: {type(complex_event_message)}")
             # for balance updates there may be several objects in a single response
 
-            # self.logger().info(f"Got event_message: {event_message}")
+            self.logger().info(f"Got event_message: {event_message}")
 
             try:
                 channel: str = event_message.get("channel", None)          
@@ -539,10 +539,12 @@ class KrakenV2Exchange(ExchangePyBase):
 
                             # self.logger().info(f"Received a data Message from channel {channel}: {item}")
                             if "exec_type" in item:
-                                if item["exec_type"] in ["filled", "trade"]:
+                                if item["exec_type"] in ["trade"]:
                                     trade_message.append(item)
-
-                                order_message.append(item)                                   
+                                elif item["exec_type"] in ["filled", "pending_new"]:
+                                    continue
+                                else:    
+                                    order_message.append(item)                                   
 
                         # trade or order message can have multiple records                
                         if trade_message:
