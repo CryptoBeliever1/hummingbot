@@ -8,7 +8,7 @@ import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
-from typing import Dict
+from typing import Dict, Union
 
 import pandas as pd
 from pydantic import Field
@@ -21,12 +21,14 @@ from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.in_flight_order import OrderState
 from hummingbot.core.data_type.order_candidate import OrderCandidate
 from hummingbot.core.event.events import (
+    BuyOrderCompletedEvent,
     BuyOrderCreatedEvent,
     MarketOrderFailureEvent,
     OrderCancelledEvent,
     OrderFilledEvent,
     OrderType,
     PositionAction,
+    SellOrderCompletedEvent,
     SellOrderCreatedEvent,
 )
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
@@ -1404,8 +1406,17 @@ class CrossMmCustom(ScriptStrategyBase):
             if order.client_order_id == event.order_id:
                 return order
         return None
+
+    def get_taker_completed_order_by_event(self, event: Union[SellOrderCompletedEvent, BuyOrderCompletedEvent]):
+        """
+        Returns an order object if it's an active taker order or None
+        """
+        for order in self.get_active_orders(connector_name=self.taker):
+            if order.client_order_id == event.order_id:
+                return order
+        return None        
     
-    def format_filled_order_message(self, client_order_id, amount, price, quote_currency, base_currency, is_buy_order=True, is_maker_exchange_order=True):
+    def format_filled_order_message(self, client_order_id, amount, price, quote_currency, base_currency, size=None, is_buy_order=True, is_maker_exchange_order=True):
         if is_buy_order:
             order_direction = "BUY"
         else:
@@ -1416,9 +1427,29 @@ class CrossMmCustom(ScriptStrategyBase):
         else:
             maker_or_taker = "TAKER"    
 
-        log_message = f"Filled {maker_or_taker} {order_direction} order for {amount * price} {quote_currency} ({amount} {base_currency} at {price} {quote_currency}). Order ID: {client_order_id}"
+        additional_header = ""
+
+        if price is None:
+            # size: Decimal
+            # amount: Decimal
+            price = size / amount
+            # price = round(price, self.order_price_precision)
+            # additional_header = "Fully Completed! "
+            if not is_maker_exchange_order:
+                taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
+                if taker_rules:
+                    if taker_rules.max_price_significant_digits is not None:
+                        price = round(price, taker_rules.max_price_significant_digits)
+
+
+        if size is None:
+            size = amount * price    
+
+        size = round(size, self.quote_precision_for_output)
+
+        log_message = f"{additional_header}Filled {maker_or_taker} {order_direction} order for {size} {quote_currency} ({amount} {base_currency} at {price} {quote_currency}). Order ID: {client_order_id}"
         
-        telegram_message = f"Filled <b>{maker_or_taker} {order_direction}</b> order for <b>{amount * price} {quote_currency}</b> (<b>{amount} {base_currency}</b> at {price} {quote_currency}). Order ID: {client_order_id}"
+        telegram_message = f"{additional_header}Filled <b>{maker_or_taker} {order_direction}</b> order for <b>{size} {quote_currency}</b> (<b>{amount} {base_currency}</b> at {price} {quote_currency}). Order ID: {client_order_id}"
 
         return {'log_message': log_message, 
                 'telegram_message': telegram_message}
@@ -1589,23 +1620,50 @@ class CrossMmCustom(ScriptStrategyBase):
         
         # Processing Taker order filled event
         # Sending notification if a taker order is filled
-        filled_order = self.get_taker_order_by_event(event)
+        # filled_order = self.get_taker_order_by_event(event)
+        
+        # if filled_order is not None:
+        #     is_buy_order = (event.trade_type == TradeType.BUY)
+           
+        #     order_message = self.format_filled_order_message(
+        #         filled_order.client_order_id, 
+        #         event.amount, 
+        #         event.price, 
+        #         filled_order.quote_currency, 
+        #         filled_order.base_currency, 
+        #         is_buy_order=is_buy_order, 
+        #         is_maker_exchange_order=False
+        #     )
+            
+        #     # self.logger().info(order_message['log_message'])
+        #     self.telegram_utils.send_unformatted_message(order_message['telegram_message'])             
+
+    def did_complete_buy_order(self, event: BuyOrderCompletedEvent):
+        self.notify_about_completed_order(event)
+        
+    def did_complete_sell_order(self, event: SellOrderCompletedEvent):
+        self.notify_about_completed_order(event)
+
+    def notify_about_completed_order(self, event: Union[SellOrderCompletedEvent, BuyOrderCompletedEvent]):
+        filled_order = self.get_taker_completed_order_by_event(event)
         
         if filled_order is not None:
-            is_buy_order = (event.trade_type == TradeType.BUY)
-           
+
+            is_buy_order = isinstance(event, BuyOrderCompletedEvent)    
+
             order_message = self.format_filled_order_message(
                 filled_order.client_order_id, 
-                event.amount, 
-                event.price, 
-                filled_order.quote_currency, 
-                filled_order.base_currency, 
+                event.base_asset_amount, 
+                None, 
+                event.quote_asset, 
+                event.base_asset,
+                size = event.quote_asset_amount, 
                 is_buy_order=is_buy_order, 
                 is_maker_exchange_order=False
             )
             
             # self.logger().info(order_message['log_message'])
-            self.telegram_utils.send_unformatted_message(order_message['telegram_message'])             
+            self.telegram_utils.send_unformatted_message(order_message['telegram_message'])        
 
     def check_rate_count(self):
         """
@@ -1740,6 +1798,40 @@ class CrossMmCustom(ScriptStrategyBase):
         # lines.extend([f"trading_rules on maker: {self.connectors[self.maker].trading_rules.get(self.maker_pair)}"])
         # lines.extend([f"say_hello: {min_quantum_2}"])
         lines.extend([f"self.taker_base_free = {self.taker_base_free}, self.taker_quote_free = {self.taker_quote_free}"])
+
+        # cdef class TradingRule:
+        #     def __init__(self,
+        #                  trading_pair: str,
+        #                  min_order_size: Decimal = s_decimal_0,
+        #                  max_order_size: Decimal = s_decimal_max,
+        #                  min_price_increment: Decimal = s_decimal_min,
+        #                  min_base_amount_increment: Decimal = s_decimal_min,
+        #                  min_quote_amount_increment: Decimal = s_decimal_min,
+        #                  min_notional_size: Decimal = s_decimal_0,
+        #                  min_order_value: Decimal = s_decimal_0,
+        #                  max_price_significant_digits: Decimal = s_decimal_max,
+        #                  supports_limit_orders: bool = True,
+        #                  supports_market_orders: bool = True,
+        #                  buy_order_collateral_token: Optional[str] = None,
+        #                  sell_order_collateral_token: Optional[str] = None):
+        #         self.trading_pair = trading_pair
+        #         self.min_order_size = min_order_size
+        #         self.max_order_size = max_order_size
+        #         self.min_price_increment = min_price_increment
+        #         self.min_base_amount_increment = min_base_amount_increment
+        #         self.min_quote_amount_increment = min_quote_amount_increment
+        #         self.min_notional_size = min_notional_size
+        #         self.min_order_value = min_order_value
+        #         self.max_price_significant_digits = max_price_significant_digits
+        #         self.supports_limit_orders = supports_limit_orders
+        #         self.supports_market_orders = supports_market_orders
+        #         quote_token = split_hb_trading_pair(self.trading_pair)[1]
+        #         self.buy_order_collateral_token = buy_order_collateral_token or quote_token
+        #         self.sell_order_collateral_token = sell_order_collateral_token or quote_token
+
+
+
+
         maker_rules = self.connectors[self.maker].trading_rules.get(self.maker_pair)
         taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
 
