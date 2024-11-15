@@ -1435,11 +1435,13 @@ class CrossMmCustom(ScriptStrategyBase):
             price = size / amount
             # price = round(price, self.order_price_precision)
             # additional_header = "Fully Completed! "
+
             if not is_maker_exchange_order:
                 taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
                 if taker_rules:
-                    if taker_rules.max_price_significant_digits is not None:
-                        price = round(price, taker_rules.max_price_significant_digits)
+                    if taker_rules.min_price_increment is not None:
+                        significant_digits = -int(f"{taker_rules.min_price_increment:e}".split('e')[-1])
+                        price = round(price, significant_digits)
 
 
         if size is None:
@@ -1849,8 +1851,10 @@ class CrossMmCustom(ScriptStrategyBase):
             lines.append(f"    {maker_rule:<30} {taker_rule}")
 
         return "\n".join(lines)
+        # return taker_rules.__repr__()    
 
     def format_rule(self, rule):
+        # significant_digits = -int(f"{rule.min_price_increment:e}".split('e')[-1])
         return [
             f"Trading Pair: {rule.trading_pair}",
             f"Min Order Size: {rule.min_order_size}",
