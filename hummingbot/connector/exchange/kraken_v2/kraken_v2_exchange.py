@@ -521,7 +521,7 @@ class KrakenV2Exchange(ExchangePyBase):
             # self.logger().info(f"complex_event_message: {complex_event_message}, type: {type(complex_event_message)}")
             # for balance updates there may be several objects in a single response
 
-            self.logger().info(f"Got event_message: {event_message}")
+            # self.logger().info(f"Got event_message: {event_message}")
 
             try:
                 channel: str = event_message.get("channel", None)          
@@ -737,7 +737,7 @@ class KrakenV2Exchange(ExchangePyBase):
     def _process_trade_message(self, trades: List):
         
         for update in trades:
-            self.logger().info(f"Received a Trade Message. Order or Trade: {update}")
+            # self.logger().info(f"Received a Trade Message. Order or Trade: {update}")
             # trade_id: str = next(iter(update))
             trade: Dict[str, str] = update
             # trade["trade_id"] = update["exec_id"]
@@ -777,7 +777,7 @@ class KrakenV2Exchange(ExchangePyBase):
         # update = orders[0]
         # self.logger().info(f"Received Order Message. Orders: {orders}")
         for order_msg in orders:
-            self.logger().info(f"Received Order Message. Order: {order_msg}")
+            # self.logger().info(f"Received Order Message. Order: {order_msg}")
             client_order_id = str(order_msg.get("order_userref", ""))
             exchange_order_id = order_msg.get("order_id")
             tracked_order = self._order_tracker.all_updatable_orders.get(client_order_id)

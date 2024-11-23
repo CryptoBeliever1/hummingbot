@@ -1784,22 +1784,45 @@ class CrossMmCustom(ScriptStrategyBase):
         balance_df = self.get_balance_df()
         lines.extend(["", "  Balances:"] + ["    " + line for line in balance_df.to_string(index=False).split("\n")])
 
+        base_precision_for_output = self.balances_data_dict.get("base_precision_for_output")
+        quote_precision_for_output = self.balances_data_dict.get("quote_precision_for_output")
+
+        if base_precision_for_output is not None and quote_precision_for_output is not None:
+
+            line_total_base = self.telegram_utils.balance_string("", self.maker_base_symbol, self.base_total, base_precision_for_output)
+
+            line_total_quote = self.telegram_utils.balance_string('total Now', self.maker_quote_symbol, self.quote_total, quote_precision_for_output)
+
+            line_total_base_start = self.telegram_utils.balance_string("", self.maker_base_symbol, self.starting_base_total, base_precision_for_output)
+
+            line_total_quote_start = self.telegram_utils.balance_string('at start', self.maker_quote_symbol, self.starting_quote_total, quote_precision_for_output)
+
+            line_total_base_diff = self.telegram_utils.balance_string("", self.maker_base_symbol, (self.base_total - self.starting_base_total), base_precision_for_output)
+
+            line_total_quote_diff = self.telegram_utils.balance_string('Diff', self.maker_quote_symbol, (self.quote_total - self.starting_quote_total), quote_precision_for_output)            
+
+
+            lines.extend([f"\n{line_total_base.strip()}|    {line_total_quote.strip()}"])
+            lines.extend([f"{line_total_base_start.strip()}|    {line_total_quote_start.strip()}"])
+            lines.extend([f"{line_total_base_diff.strip()}|    {line_total_quote_diff.strip()}"])
+
+
         try:
             orders_df = self.active_orders_df()
             lines.extend(["", "  Active Orders:"] + ["    " + line for line in orders_df.to_string(index=False).split("\n")])
         except ValueError:
             lines.extend(["", "  No active maker orders."])
 
-        lines.extend([f"\n"])
-        lines.extend([f"planned_order_price_buy: {self.planned_order_price_buy}"])
-        lines.extend([f"dust_vol_price_buy: {self.dust_vol_limit_price_buy} - hedge_price_buy: {self.hedge_price_buy}"])
-        lines.extend([f"rate_count: {rate_count}"])
-        lines.extend([f"rate_count_timestamp: {self.connectors[self.maker].rate_count_update_timestamp}"])
-        lines.extend([f"self.maker_base_free: {self.maker_base_free}"])
-        lines.extend([f"self.maker_quote_free: {self.maker_quote_free}"])
-        # lines.extend([f"trading_rules on maker: {self.connectors[self.maker].trading_rules.get(self.maker_pair)}"])
-        # lines.extend([f"say_hello: {min_quantum_2}"])
-        lines.extend([f"self.taker_base_free = {self.taker_base_free}, self.taker_quote_free = {self.taker_quote_free}"])
+        # lines.extend([f"\n"])
+        # lines.extend([f"planned_order_price_buy: {self.planned_order_price_buy}"])
+        # lines.extend([f"dust_vol_price_buy: {self.dust_vol_limit_price_buy} - hedge_price_buy: {self.hedge_price_buy}"])
+        # lines.extend([f"rate_count: {rate_count}"])
+        # lines.extend([f"rate_count_timestamp: {self.connectors[self.maker].rate_count_update_timestamp}"])
+        # lines.extend([f"self.maker_base_free: {self.maker_base_free}"])
+        # lines.extend([f"self.maker_quote_free: {self.maker_quote_free}"])
+        # # lines.extend([f"trading_rules on maker: {self.connectors[self.maker].trading_rules.get(self.maker_pair)}"])
+        # # lines.extend([f"say_hello: {min_quantum_2}"])
+        # lines.extend([f"self.taker_base_free = {self.taker_base_free}, self.taker_quote_free = {self.taker_quote_free}"])
 
         # cdef class TradingRule:
         #     def __init__(self,
@@ -1858,6 +1881,7 @@ class CrossMmCustom(ScriptStrategyBase):
         return [
             f"Trading Pair: {rule.trading_pair}",
             f"Min Order Size: {rule.min_order_size}",
+            f"Min Notional Size: {rule.min_notional_size}",
             f"Min Price Increment: {rule.min_price_increment}",
             f"Min Base Increment: {rule.min_base_amount_increment}",
             f"Supports Limit Orders: {rule.supports_limit_orders}",
