@@ -1865,7 +1865,7 @@ class CrossMmCustom(ScriptStrategyBase):
 
         lines.extend([
             "",
-            "  Trading Rules:",
+            f"  Rate Counter: {rate_count}",
             "",
             "  Maker Rules:                Taker Rules:"
         ])
