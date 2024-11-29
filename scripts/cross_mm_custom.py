@@ -651,8 +651,17 @@ class CrossMmCustom(ScriptStrategyBase):
             #     loop
             # )
             # self.logger().info(f"Notifiers: {self.hummingbot.notifiers}")
-
+            self.maker_rules = self.connectors[self.maker].trading_rules.get(self.maker_pair)
+            self.taker_rules = self.connectors[self.taker].trading_rules.get(self.taker_pair)
             
+            self.trading_rules_min_maker_order_amount = 0
+            self.trading_rules_min_taker_order_amount = 0
+
+            if self.maker_rules is not None:
+                self.trading_rules_min_maker_order_amount = float(self.maker_rules.min_order_size)
+            if self.taker_rules is not None:
+                self.trading_rules_min_taker_order_amount = float(self.taker_rules.min_order_size)                
+
 
             telegram_string = self.telegram_utils.bot_started_string(version, self.strategy, self.maker_fee, self.taker_fee, self.flow_mode)
             self.hummingbot.notify(telegram_string)
@@ -841,7 +850,23 @@ class CrossMmCustom(ScriptStrategyBase):
         # min order amount in base units
         self.min_notional_maker_amount = self.min_notional_maker / self.hedge_price_buy
         self.min_notional_taker_amount = self.min_notional_taker / self.hedge_price_buy
-        self.min_notional_for_maker_order_creation = max(self.min_notional_maker_amount, self.min_notional_taker_amount)
+        self.min_notional_for_maker_order_creation = max(
+            self.min_notional_maker_amount, 
+            self.min_notional_taker_amount,
+            self.trading_rules_min_maker_order_amount,
+            self.trading_rules_min_taker_order_amount
+            )
+
+        if debug_output:
+            output_message = f"""
+            min_notional_maker_amount: {self.min_notional_maker_amount}
+            min_notional_taker_amount: {self.min_notional_taker_amount}
+            trading_rules_min_maker_order_amount: {self.trading_rules_min_maker_order_amount}
+            trading_rules_min_taker_order_amount: {self.trading_rules_min_taker_order_amount}
+            """
+            self.logger().info(output_message)
+
+
 
         if debug_output:
             output_message = f"""
