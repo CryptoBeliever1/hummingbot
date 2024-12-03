@@ -673,6 +673,10 @@ class CrossMmCustom(ScriptStrategyBase):
 
             # self.logger().info(self.balances_data_dict)
 
+            # list for calculating profits for each individual maker fill
+            # [{'maker_order': maker_order: LimitOrder, 'taker_order_id': taker_order_inner_id: str}]
+            self.order_fills_profits_pairs = []
+
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
         except Exception as e:
@@ -1441,7 +1445,7 @@ class CrossMmCustom(ScriptStrategyBase):
                 return order
         return None        
     
-    def format_filled_order_message(self, client_order_id, amount, price, quote_currency, base_currency, size=None, is_buy_order=True, is_maker_exchange_order=True):
+    def format_filled_order_message(self, client_order_id, amount, price, quote_currency, base_currency, size=None, is_buy_order=True, is_maker_exchange_order=True, profit_dict={}):
         if is_buy_order:
             order_direction = "BUY"
         else:
@@ -1478,6 +1482,32 @@ class CrossMmCustom(ScriptStrategyBase):
         
         telegram_message = f"{additional_header}Filled <b>{maker_or_taker} {order_direction}</b> order for <b>{size} {quote_currency}</b> (<b>{amount} {base_currency}</b> at {price} {quote_currency}). Order ID: {client_order_id}"
 
+        # profits output
+        if not is_maker_exchange_order and profit_dict:
+
+                # profit_dict={'order_profit_without_fees': order_profit_without_fees,
+                #              'order_maker_fee': order_maker_fee,
+                #              'order_taker_fee': order_taker_fee,
+                #              'total_order_profit': total_order_profit,
+                #              }
+
+            order_profit_without_fees = profit_dict.get('order_profit_without_fees')
+            order_maker_fee = profit_dict.get('order_maker_fee')
+            order_taker_fee = profit_dict.get('order_taker_fee')
+            total_order_profit = profit_dict.get('total_order_profit')
+
+            if (order_profit_without_fees is not None and 
+                order_maker_fee is not None and
+                order_taker_fee is not None and
+                total_order_profit is not None):
+
+                profit_in_perc = (total_order_profit / size) * 100
+                
+                log_message = f"{log_message}\n\nProfit: {total_order_profit} {quote_currency} or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})"
+                
+                telegram_message = f"{telegram_message}\n\nProfit: <b>{total_order_profit} {quote_currency}</b> or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})"
+
+
         return {'log_message': log_message, 
                 'telegram_message': telegram_message}
 
@@ -1488,7 +1518,9 @@ class CrossMmCustom(ScriptStrategyBase):
 
         # Processing Maker order fill event
         filled_order = self.get_order_by_event(event)
-            
+
+        order_id_for_profits_calculation = None
+
         if filled_order is not None and event.trade_type == TradeType.BUY:
             order_message = self.format_filled_order_message(
                 filled_order.client_order_id, 
@@ -1532,13 +1564,20 @@ class CrossMmCustom(ScriptStrategyBase):
             
             if self.check_order_min_size_before_placing(self.taker, sell_order, notif_output=True):
                 try:
-                    self.place_order(self.taker, sell_order)
+                    order_id_for_profits_calculation = self.place_order(self.taker, sell_order)
+                    # {'maker_order': maker_order: LimitOrder, 'taker_order_id': taker_order_inner_id: str}
+                    self.order_fills_profits_pairs.append(
+                            {'maker_order': event, 
+                            'taker_order_id': sell_order
+                            }
+                         )
                 except Exception as e:
                     error_message = f"An error of type {type(e).__name__} occurred while placing taker SELL order: {e}"
                     self.logger().error(error_message, exc_info=True)
                     self.telegram_utils.send_unformatted_message(error_message)
                 else:
                     self.logger().info(f"Sending TAKER SELL order for {taker_sell_order_amount} {filled_order.base_currency} at price: {sell_price_with_slippage} {filled_order.quote_currency}")
+                    # self.logger().info(f"Order fills profits: {self.order_fills_profits_pairs}")
         
         elif filled_order is not None and event.trade_type == TradeType.SELL:
             order_message = self.format_filled_order_message(
@@ -1586,13 +1625,19 @@ class CrossMmCustom(ScriptStrategyBase):
             
             if self.check_order_min_size_before_placing(self.taker, buy_order, notif_output=True):
                 try:
-                    self.place_order(self.taker, buy_order)
+                    order_id_for_profits_calculation = self.place_order(self.taker, buy_order)
+                    self.order_fills_profits_pairs.append(
+                            {'maker_order': event, 
+                            'taker_order_id': buy_order
+                            }
+                         )                    
                 except Exception as e:
                     error_message = f"An error of type {type(e).__name__} occurred while placing taker BUY order: {e}"
                     self.logger().error(error_message, exc_info=True)
                     self.telegram_utils.send_unformatted_message(error_message)                    
                 else:
                     self.logger().info(f"Sending TAKER BUY order for {taker_buy_order_amount} {filled_order.base_currency} at price: {buy_price_with_slippage} {filled_order.quote_currency}")
+                    # self.logger().info(f"Order fills profits: {self.order_fills_profits_pairs}")
 
         if filled_order is not None:
 
@@ -1676,7 +1721,55 @@ class CrossMmCustom(ScriptStrategyBase):
         
         if filled_order is not None:
 
-            is_buy_order = isinstance(event, BuyOrderCompletedEvent)    
+            # order_fills_profits_pairs.append(
+            #                 {'maker_order': filled_order, 
+            #                 'taker_order_id': order_id_for_profits_calculation
+            #                 }
+            #              ) 
+            is_buy_order = isinstance(event, BuyOrderCompletedEvent)
+
+            expected_trade_side = TradeType.BUY if is_buy_order else TradeType.SELL
+
+            # profit calculation
+            order_profit_without_fees = None
+            order_maker_fee = None
+            order_taker_fee = None
+            total_order_profit = None
+
+            matching_order_pairs = [
+            order_pair for order_pair in self.order_fills_profits_pairs 
+            if (order_pair.get('taker_order_id') and 
+                order_pair['taker_order_id'].order_side == expected_trade_side and
+                order_pair['taker_order_id'].amount <= event.base_asset_amount * Decimal(str(1.005)) and
+                order_pair['taker_order_id'].amount >= event.base_asset_amount * Decimal(str(0.995))
+                )
+        ]
+
+            if matching_order_pairs:
+                # Take the first matching pair
+                order_pair = matching_order_pairs[0]
+                corresponding_maker_order = order_pair.get('maker_order')
+                
+                if corresponding_maker_order:
+                    # Consistent calculation for both buy and sell orders
+                    corresponding_maker_order_filled_size = corresponding_maker_order.amount * corresponding_maker_order.price
+                    
+                    if is_buy_order:
+                        order_profit_without_fees = corresponding_maker_order_filled_size - event.quote_asset_amount
+                    else:
+                        order_profit_without_fees = event.quote_asset_amount - corresponding_maker_order_filled_size
+                    
+                    # Getting maker fee
+                        
+
+                    # Calculate fees consistently for both buy and sell orders
+                    order_maker_fee = corresponding_maker_order_filled_size * Decimal(str(self.maker_fee))
+                    order_taker_fee = event.quote_asset_amount * Decimal(str(self.taker_fee))
+                    
+                    total_order_profit = order_profit_without_fees - order_maker_fee - order_taker_fee
+
+                    # Remove the processed order pair from the list
+                    self.order_fills_profits_pairs.remove(order_pair)
 
             order_message = self.format_filled_order_message(
                 filled_order.client_order_id, 
@@ -1686,7 +1779,12 @@ class CrossMmCustom(ScriptStrategyBase):
                 event.base_asset,
                 size = event.quote_asset_amount, 
                 is_buy_order=is_buy_order, 
-                is_maker_exchange_order=False
+                is_maker_exchange_order=False,
+                profit_dict={'order_profit_without_fees': order_profit_without_fees,
+                             'order_maker_fee': order_maker_fee,
+                             'order_taker_fee': order_taker_fee,
+                             'total_order_profit': total_order_profit,
+                             }
             )
             
             # self.logger().info(order_message['log_message'])
