@@ -1495,6 +1495,7 @@ class CrossMmCustom(ScriptStrategyBase):
             order_maker_fee = profit_dict.get('order_maker_fee')
             order_taker_fee = profit_dict.get('order_taker_fee')
             total_order_profit = profit_dict.get('total_order_profit')
+            maker_order_id = profit_dict.get('maker_order_id')
 
             if (order_profit_without_fees is not None and 
                 order_maker_fee is not None and
@@ -1503,9 +1504,9 @@ class CrossMmCustom(ScriptStrategyBase):
 
                 profit_in_perc = (total_order_profit / size) * 100
                 
-                log_message = f"{log_message}\n\nProfit: {total_order_profit} {quote_currency} or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})"
+                log_message = f"{log_message}\n\nProfit: {total_order_profit} {quote_currency} or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}"
                 
-                telegram_message = f"{telegram_message}\n\nProfit: <b>{total_order_profit} {quote_currency}</b> or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})"
+                telegram_message = f"{telegram_message}\n\nProfit: <b>{total_order_profit} {quote_currency}</b> or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}"
 
 
         return {'log_message': log_message, 
@@ -1772,12 +1773,24 @@ class CrossMmCustom(ScriptStrategyBase):
                         order_profit_without_fees = corresponding_maker_order_filled_size - event.quote_asset_amount
                     else:
                         order_profit_without_fees = event.quote_asset_amount - corresponding_maker_order_filled_size
-                    
-                    # Getting maker fee
+
+                    # calculating maker fee by default using the options fee percent setting self.maker_fee
+                    order_maker_fee = corresponding_maker_order_filled_size * Decimal(str(self.maker_fee))
+
+                    # Access the trade_fee from the OrderFilledEvent
+                    trade_fee = corresponding_maker_order.trade_fee
+                   
+                    # First, check flat fees
+                    if trade_fee.flat_fees:
+                        # Take the first flat fee (most common scenario)
+                        flat_fee = trade_fee.flat_fees[0]
                         
+                        if flat_fee.token == self.maker_quote_symbol:
+                            order_maker_fee = flat_fee.amount
+                            self.logger().notify(f"Taking a flat fee from the maker order event: {order_maker_fee}")                       
 
                     # Calculate fees consistently for both buy and sell orders
-                    order_maker_fee = corresponding_maker_order_filled_size * Decimal(str(self.maker_fee))
+
                     order_taker_fee = event.quote_asset_amount * Decimal(str(self.taker_fee))
                     
                     total_order_profit = order_profit_without_fees - order_maker_fee - order_taker_fee
@@ -1799,6 +1812,7 @@ class CrossMmCustom(ScriptStrategyBase):
                              'order_maker_fee': order_maker_fee,
                              'order_taker_fee': order_taker_fee,
                              'total_order_profit': total_order_profit,
+                             'maker_order_id': corresponding_maker_order.order_id,
                              }
             )
             
