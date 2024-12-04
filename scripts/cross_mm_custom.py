@@ -1721,11 +1721,10 @@ class CrossMmCustom(ScriptStrategyBase):
         
         if filled_order is not None:
 
-            # order_fills_profits_pairs.append(
-            #                 {'maker_order': filled_order, 
-            #                 'taker_order_id': order_id_for_profits_calculation
-            #                 }
-            #              ) 
+                    # self.order_fills_profits_pairs.append(
+                    #         {'maker_order': event, (OrderFilledEvent)
+                    #         'taker_order_id': buy_order (OrderCandidate)
+                    #         }
             is_buy_order = isinstance(event, BuyOrderCompletedEvent)
 
             expected_trade_side = TradeType.BUY if is_buy_order else TradeType.SELL
@@ -1736,12 +1735,27 @@ class CrossMmCustom(ScriptStrategyBase):
             order_taker_fee = None
             total_order_profit = None
 
+            self.logger().info(f"order_fills_profits_pairs: {self.order_fills_profits_pairs}")
+
+
             matching_order_pairs = [
-            order_pair for order_pair in self.order_fills_profits_pairs 
+            order_pair for order_pair in self.order_fills_profits_pairs
+
+            # event example on taker (event) - BuyOrderCompletedEvent
+            # {"timestamp": 1733263659.0, "order_id": "HUMBOTBGAUT62864e4b3a55cc561c30c", "base_asset": "GIGA", "quote_asset": "USDT", "base_asset_amount": "150", "quote_asset_amount": "6.0255", "order_type": "OrderType.LIMIT", "exchange_order_id": "C02__492752804511879170097", "event_name": "BuyOrderCompletedEvent", "event_source": "mexc"}
+
+            # event example on maker: (OrderFilledEvent)
+            # {"timestamp": 1733263659.0, "order_id": "666947820", "trading_pair": "GIGA-USD", "trade_type": "TradeType.SELL", "order_type": "OrderType.LIMIT", "price": "0.040327", "amount": "150.0", "trade_fee": {"percent": "0", "percent_token": "USD", "flat_fees": [{"token": "USD", "amount": "0.0121"}]}, "exchange_trade_id": "TDHZZ5-Z56HU-JK6MF2", "exchange_order_id": "OB7BVL-PD3JS-VAVKWS", "leverage": 1, "position": "NIL", "event_name": "OrderFilledEvent", "event_source": "kraken_v2"}
+
+            # order_pair['taker_order_id'] is the OrderCandidate type, it's the object sent to create a taker order, this is not an event
+            # order_pair['maker_order'] is OrderFilledEvent object type. This is a partially or fully filled order on maker
+
+            # in the condition below we search for the taker candidate that is similar to the current taker fill by side and amount. Additional condition: the corresponding maker OrderFilledEvent (the exact one the taker candidate was based on) timestamp is close to the current taker OrderCompletedEvent event.
             if (order_pair.get('taker_order_id') and 
                 order_pair['taker_order_id'].order_side == expected_trade_side and
                 order_pair['taker_order_id'].amount <= event.base_asset_amount * Decimal(str(1.005)) and
-                order_pair['taker_order_id'].amount >= event.base_asset_amount * Decimal(str(0.995))
+                order_pair['taker_order_id'].amount >= event.base_asset_amount * Decimal(str(0.995)) and
+                (order_pair['maker_order'].timestamp - event.timestamp) <= 2
                 )
         ]
 
@@ -1770,6 +1784,7 @@ class CrossMmCustom(ScriptStrategyBase):
 
                     # Remove the processed order pair from the list
                     self.order_fills_profits_pairs.remove(order_pair)
+                    self.logger().info(f"order_fills_profits_pairs after removing the matched one: {self.order_fills_profits_pairs}")
 
             order_message = self.format_filled_order_message(
                 filled_order.client_order_id, 
