@@ -1736,7 +1736,7 @@ class CrossMmCustom(ScriptStrategyBase):
             order_taker_fee = None
             total_order_profit = None
 
-            self.logger().info(f"order_fills_profits_pairs: {self.order_fills_profits_pairs}")
+            # self.logger().info(f"order_fills_profits_pairs: {self.order_fills_profits_pairs}")
 
 
             matching_order_pairs = [
@@ -1787,7 +1787,7 @@ class CrossMmCustom(ScriptStrategyBase):
                         
                         if flat_fee.token == self.maker_quote_symbol:
                             order_maker_fee = flat_fee.amount
-                            self.logger().notify(f"Taking a flat fee from the maker order event: {order_maker_fee}")                       
+                            # self.logger().notify(f"Taking a flat fee from the maker order event: {order_maker_fee}")                       
 
                     # Calculate fees consistently for both buy and sell orders
 
