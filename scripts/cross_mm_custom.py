@@ -1756,7 +1756,7 @@ class CrossMmCustom(ScriptStrategyBase):
                 order_pair['taker_order_id'].order_side == expected_trade_side and
                 order_pair['taker_order_id'].amount <= event.base_asset_amount * Decimal(str(1.005)) and
                 order_pair['taker_order_id'].amount >= event.base_asset_amount * Decimal(str(0.995)) and
-                (order_pair['maker_order'].timestamp - event.timestamp) <= 2
+                (event.timestamp - order_pair['maker_order'].timestamp) <= 2.0
                 )
         ]
 
