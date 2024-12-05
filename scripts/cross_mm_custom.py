@@ -934,6 +934,7 @@ class CrossMmCustom(ScriptStrategyBase):
         if self.go_passive():
             return
         
+        # True or false to output debug messages
         debug_output = self.debug_output_value_for_this_function(debug_output, function_name='check_active_orders')
 
         self.active_limit_orders = self.get_active_orders(connector_name=self.maker)
@@ -958,6 +959,16 @@ class CrossMmCustom(ScriptStrategyBase):
         # Check for active buy orders
         active_buy_orders = [order for order in self.active_limit_orders if order.is_buy]
         active_sell_orders = [order for order in self.active_limit_orders if not order.is_buy]
+
+        if len(active_buy_orders) > 1 or len(active_sell_orders) > 1:
+            # Cancel all orders because one order per side is allowed only
+            # Also making a small delay for the orders to cancel
+            self.logger().notify("Found more than one order on buy or sell side. Cancelling all orders.")
+            self.cancel_all_active_limit_orders(debug_output=True)
+            self.active_buy_order = None
+            self.active_sell_order = None
+            self.idle_timers.append(Timer(name="after_more_than_one_active_order_found_timer", duration=self.after_order_is_filled_delay))
+            return           
 
         if active_buy_orders:
             self.active_buy_order = active_buy_orders[0]
@@ -1334,6 +1345,11 @@ class CrossMmCustom(ScriptStrategyBase):
             self.sell_order_client_id_to_edit_in_current_tick_cycle = order.client_order_id
         
         # self.create_new_maker_order(side=new_order_side)
+
+    def cancel_all_active_limit_orders(self, debug_output=False):
+        for order in self.active_limit_orders:
+            self.custom_cancel_order(order=order, debug_output=debug_output)    
+
 
     def custom_cancel_order(self, order, debug_output=False):
         if order is not None:
