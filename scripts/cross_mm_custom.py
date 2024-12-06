@@ -685,6 +685,8 @@ class CrossMmCustom(ScriptStrategyBase):
                 'total_taker_fees': Decimal("0"),
             }
 
+            self.bot_start_time_timestamp = time.time()
+
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
         except Exception as e:
@@ -1537,21 +1539,28 @@ class CrossMmCustom(ScriptStrategyBase):
 
                 # profit_in_perc = (total_order_profit / size) * 100
                 try:
-                    profit_in_perc = (total_order_profit / order_profit_without_fees) * 100
+                    profit_in_perc = (total_order_profit / size) * 100
                 except ZeroDivisionError:
                     profit_in_perc = 0
-                
-                starting_time_timestamp = self.hummingbot.start_time
 
-                starting_time = time.strftime('%m-%d %H:%M', time.gmtime(starting_time_timestamp))
+                starting_time = time.strftime('%-d %b, %H:%M', time.gmtime(self.bot_start_time_timestamp))
 
-                log_message = f"{log_message}\n\nProfit: {total_order_profit} {quote_currency} or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}\nTotal Profit since {starting_time}: {self.accumulated_profits['total_order_profit']}\nExcl. maker fees: {self.accumulated_profits['total_order_profit_excluding_maker_fee']}"
+                elapsed_time = self.get_elapsed_time(self.bot_start_time_timestamp)
+
+                log_message = f"{log_message}\n\nProfit: {total_order_profit} {quote_currency} or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}\n\nSince {starting_time} ({elapsed_time}): {self.accumulated_profits['total_order_profit']} {quote_currency}\nExcl. maker fees: {self.accumulated_profits['total_order_profit_excluding_maker_fee']} {quote_currency}"
                 
-                telegram_message = f"{telegram_message}\n\nProfit: <b>{total_order_profit} {quote_currency}</b> or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}\nTotal Profit since {starting_time}: <b>{self.accumulated_profits['total_order_profit']}</b>\nExcl. maker fees: {self.accumulated_profits['total_order_profit_excluding_maker_fee']}"
+                telegram_message = f"{telegram_message}\n\nProfit: <b>{total_order_profit} {quote_currency}</b> or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}\n\nSince {starting_time} ({elapsed_time}): <b>{self.accumulated_profits['total_order_profit']} {quote_currency}</b>\nExcl. maker fees: {self.accumulated_profits['total_order_profit_excluding_maker_fee']} {quote_currency}"
 
 
         return {'log_message': log_message, 
                 'telegram_message': telegram_message}
+
+    def get_elapsed_time(self, start_timestamp):
+        elapsed_seconds = time.time() - start_timestamp
+        days = int(elapsed_seconds // 86400)  # Seconds in a day
+        hours = int((elapsed_seconds % 86400) // 3600)  # Remaining seconds to hours
+        minutes = int((elapsed_seconds % 3600) // 60)  # Remaining seconds to minutes
+        return f"{days} d. {hours:02}:{minutes:02}"
 
     def did_fill_order(self, event: OrderFilledEvent):
         '''
