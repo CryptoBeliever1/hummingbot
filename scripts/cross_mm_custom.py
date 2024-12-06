@@ -677,6 +677,14 @@ class CrossMmCustom(ScriptStrategyBase):
             # [{'maker_order': maker_order: LimitOrder, 'taker_order_id': taker_order_inner_id: str}]
             self.order_fills_profits_pairs = []
 
+            # for calculating total sum of all profits from each order
+            self.accumulated_profits = {
+                'total_order_profit': Decimal("0"),
+                'total_order_profit_excluding_maker_fee': Decimal("0"),
+                'total_maker_fees': Decimal("0"),
+                'total_taker_fees': Decimal("0"),
+            }
+
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
         except Exception as e:
@@ -1507,6 +1515,15 @@ class CrossMmCustom(ScriptStrategyBase):
                 #              'total_order_profit': total_order_profit,
                 #              }
 
+                # dictionary structure for accumulated profits:
+                # self.accumulated_profits = {
+                #     'total_order_profit': Decimal("0"),
+                #     'total_order_profit_excluding_maker_fee': Decimal("0"),
+                #     'total_maker_fees': Decimal("0"),
+                #     'total_taker_fees': Decimal("0"),
+                # }
+
+
             order_profit_without_fees = profit_dict.get('order_profit_without_fees')
             order_maker_fee = profit_dict.get('order_maker_fee')
             order_taker_fee = profit_dict.get('order_taker_fee')
@@ -1518,11 +1535,19 @@ class CrossMmCustom(ScriptStrategyBase):
                 order_taker_fee is not None and
                 total_order_profit is not None):
 
-                profit_in_perc = (total_order_profit / size) * 100
+                # profit_in_perc = (total_order_profit / size) * 100
+                try:
+                    profit_in_perc = (total_order_profit / order_profit_without_fees) * 100
+                except ZeroDivisionError:
+                    profit_in_perc = 0
                 
-                log_message = f"{log_message}\n\nProfit: {total_order_profit} {quote_currency} or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}"
+                starting_time_timestamp = self.hummingbot.start_time
+
+                starting_time = time.strftime('%m-%d %H:%M', time.gmtime(starting_time_timestamp))
+
+                log_message = f"{log_message}\n\nProfit: {total_order_profit} {quote_currency} or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}\nTotal Profit since {starting_time}: {self.accumulated_profits['total_order_profit']}\nExcl. maker fees: {self.accumulated_profits['total_order_profit_excluding_maker_fee']}"
                 
-                telegram_message = f"{telegram_message}\n\nProfit: <b>{total_order_profit} {quote_currency}</b> or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}"
+                telegram_message = f"{telegram_message}\n\nProfit: <b>{total_order_profit} {quote_currency}</b> or {profit_in_perc:.3f}%\n({order_profit_without_fees} - {order_maker_fee} - {order_taker_fee})\nMatched Order ID: {maker_order_id}\nTotal Profit since {starting_time}: <b>{self.accumulated_profits['total_order_profit']}</b>\nExcl. maker fees: {self.accumulated_profits['total_order_profit_excluding_maker_fee']}"
 
 
         return {'log_message': log_message, 
@@ -1810,6 +1835,21 @@ class CrossMmCustom(ScriptStrategyBase):
                     order_taker_fee = event.quote_asset_amount * Decimal(str(self.taker_fee))
                     
                     total_order_profit = order_profit_without_fees - order_maker_fee - order_taker_fee
+                    total_order_profit_excluding_maker_fee = order_profit_without_fees - order_taker_fee
+
+                    # dictionary structure:
+                    # self.accumulated_profits = {
+                    #     'total_order_profit': Decimal("0"),
+                    #     'total_order_profit_excluding_maker_fee': Decimal("0"),
+                    #     'total_maker_fees': Decimal("0"),
+                    #     'total_taker_fees': Decimal("0"),
+                    # }                    
+
+                    self.accumulated_profits['total_order_profit'] += total_order_profit
+                    self.accumulated_profits['total_order_profit_excluding_maker_fee'] += total_order_profit_excluding_maker_fee
+
+                    self.accumulated_profits['total_maker_fees'] += order_maker_fee
+                    self.accumulated_profits['total_taker_fees'] += order_taker_fee
 
                     # Remove the processed order pair from the list
                     self.order_fills_profits_pairs.remove(order_pair)
