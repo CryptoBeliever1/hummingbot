@@ -270,6 +270,93 @@ class CrossMMCustomConfig(BaseClientModel):
 
 s_decimal_nan = Decimal("NaN")
 
+class MakerTotalBaseBalanceChecker:
+    """
+    A class to check if the total base balance can be checked based on certain time delays
+    after the latest balance check and the latest order fill.
+
+    Attributes:
+        latest_balance_check_timestamp (float): The timestamp of the latest balance check.
+        latest_order_fill_timestamp (float): The timestamp of the latest order fill.
+        after_latest_balance_check_delay (int): The delay in seconds after the latest balance check before it can be checked again.
+        after_latest_order_fill_delay (int): The delay in seconds after the latest order fill before it can be checked again.
+    """
+
+    def __init__(self, after_latest_balance_check_delay: int = 3, after_latest_order_fill_delay: int = 3):
+        """
+        Initializes the MakerTotalBaseBalanceChecker instance with the current timestamp for balance check
+        and order fill, and the specified or default delay times.
+
+        Args:
+            after_latest_balance_check_delay (int): Delay in seconds after the latest balance check before it can be checked again (default 3).
+            after_latest_order_fill_delay (int): Delay in seconds after the latest order fill before it can be checked again (default 3).
+        """
+        self.latest_balance_check_timestamp: float = time.time()
+        self.latest_order_fill_timestamp: float = time.time()
+        self.after_latest_balance_check_delay: int = after_latest_balance_check_delay
+        self.after_latest_order_fill_delay: int = after_latest_order_fill_delay
+        self.total_balance_during_the_latest_detected_change: float = None
+
+    def can_the_total_base_balance_be_checked_now(self) -> bool:
+        """
+        Determines if the total base balance can be checked based on the elapsed time
+        since the latest balance check and order fill, compared to their respective delay times.
+
+        Returns:
+            bool: True if both delay conditions are satisfied, otherwise False.
+        """
+        current_time = time.time()
+        time_since_balance_check = current_time - self.latest_balance_check_timestamp
+        time_since_order_fill = current_time - self.latest_order_fill_timestamp
+        
+        return (time_since_balance_check >= self.after_latest_balance_check_delay and
+                time_since_order_fill >= self.after_latest_order_fill_delay)
+
+    def check_if_the_balance_changed(self, starting_base_total: float, current_base_total: float, 
+                                     meaningful_difference_in_perc: float = 0.1) -> bool:
+        """
+        Checks if the total base balance has changed by more than the specified meaningful percentage.
+
+        This method first verifies if the balance check conditions are met using 
+        `can_the_total_base_balance_be_checked_now`. If the conditions are satisfied:
+        - It updates the `latest_balance_check_timestamp` to the current time.
+        - It calculates the percentage difference between `starting_base_total` and `current_base_total`.
+        - If no prior balance change has been recorded (`total_balance_during_the_latest_detected_change` is None),
+          it checks if the difference exceeds the specified meaningful percentage.
+        - If a prior balance change has been recorded, it compares the `current_base_total` with the 
+          balance during the last detected change and checks if the difference exceeds the meaningful percentage.
+        - If a meaningful change is detected, it updates `total_balance_during_the_latest_detected_change`.
+
+        Args:
+            starting_base_total (float): The starting value of the base total balance.
+            current_base_total (float): The current value of the base total balance.
+            meaningful_difference_in_perc (float): The meaningful percentage difference to consider (default 0.1%).
+
+        Returns:
+            bool: True if a meaningful change in balance is detected, otherwise False.
+        """
+        return_value = False
+        
+        if self.can_the_total_base_balance_be_checked_now():
+            # Update the timestamp of the latest balance check
+            self.latest_balance_check_timestamp = time.time()
+            # Calculate the percentage difference
+            difference_percentage = abs(current_base_total - starting_base_total) / starting_base_total * 100
+                       
+            if self.total_balance_during_the_latest_detected_change is None:
+                if difference_percentage > meaningful_difference_in_perc:
+                    return_value = True
+            else:    
+                latest_difference_percentage = abs(current_base_total - self.total_balance_during_the_latest_detected_change) / self.total_balance_during_the_latest_detected_change * 100
+                if latest_difference_percentage > meaningful_difference_in_perc and difference_percentage > meaningful_difference_in_perc: 
+                    return_value = True                
+
+            if return_value:
+                self.total_balance_during_the_latest_detected_change = current_base_total               
+
+        return return_value
+
+
 class CrossMmCustom(ScriptStrategyBase):
 
 ### OPTIONS ###
@@ -499,6 +586,8 @@ class CrossMmCustom(ScriptStrategyBase):
             self.buy_order_flow()
 
             self.sell_order_flow()
+
+            self.check_and_correct_total_base_balance(debug_output=True)
         
         except IOError as e:
             # Static part of the expected message
@@ -644,6 +733,9 @@ class CrossMmCustom(ScriptStrategyBase):
 
             self.starting_base_total = self.base_total
             self.starting_quote_total = self.quote_total
+
+            self.base_balance_checker = MakerTotalBaseBalanceChecker(after_latest_balance_check_delay=6, after_latest_order_fill_delay=3)
+
 
             # loop = asyncio.get_event_loop()
             # asyncio.run_coroutine_threadsafe(
@@ -1692,6 +1784,9 @@ class CrossMmCustom(ScriptStrategyBase):
 
         if filled_order is not None:
 
+            # setting the latest order fill timestamp so that the total balance checker
+            # don't run immediately after
+            self.base_balance_checker.latest_order_fill_timestamp = time.time()    
             # Cancel all orders because balances have changed and 
             # the filled order may not have been filled completely
             # Also making a small delay to wait for the balances update
@@ -1772,6 +1867,8 @@ class CrossMmCustom(ScriptStrategyBase):
         
         if filled_order is not None:
 
+            self.base_balance_checker.latest_order_fill_timestamp = time.time()    
+                
                     # self.order_fills_profits_pairs.append(
                     #         {'maker_order': event, (OrderFilledEvent)
                     #         'taker_order_id': buy_order (OrderCandidate)
@@ -1934,6 +2031,12 @@ class CrossMmCustom(ScriptStrategyBase):
             # \n Rate_count_timestamp: {self.connectors[self.maker].rate_count_update_timestamp}\n"
             self.logger().info(message)
             self.telegram_utils.send_unformatted_message(message)
+
+    def check_and_correct_total_base_balance(self, notify=True, fix_balance=False, debug_output=False):
+        if not self.base_balance_checker.check_if_the_balance_changed(self.starting_base_total, self.base_total, meaningful_difference_in_perc=self.total_base_change_notification_limit):
+            return
+        if notify:
+            self.logger().notify(f"The total base balance changed for more than {self.total_base_change_notification_limit}%, from starting {self.starting_base_total} to {self.base_total} {self.maker_base_symbol}")    
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):
 
