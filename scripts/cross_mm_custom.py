@@ -2041,7 +2041,7 @@ class CrossMmCustom(ScriptStrategyBase):
         if not self.base_balance_checker.check_if_the_balance_changed(self.starting_base_total, self.base_total, meaningful_difference_in_perc=self.total_base_change_notification_limit):
             return
         if notify:
-            self.logger().notify(f"\nThe total base balance changed for more than {self.total_base_change_notification_limit}%, from {self.base_balance_checker.total_balance_before_the_latest_detected_change} to {self.base_total} {self.maker_base_symbol} (diff: {self.base_total - self.base_balance_checker.total_balance_before_the_latest_detected_change})\nThe start balance was: {self.starting_base_total} {self.maker_base_symbol}")    
+            self.logger().notify(f"\nThe total base balance changed for more than {self.total_base_change_notification_limit}%, from {self.base_balance_checker.total_balance_before_the_latest_detected_change} to {self.base_total} {self.maker_base_symbol}\n(diff: {Decimal(str(self.base_total)) - Decimal(str(self.base_balance_checker.total_balance_before_the_latest_detected_change))})\nThe start balance was: {self.starting_base_total} {self.maker_base_symbol}")    
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):
 
