@@ -296,6 +296,8 @@ class MakerTotalBaseBalanceChecker:
         self.after_latest_balance_check_delay: int = after_latest_balance_check_delay
         self.after_latest_order_fill_delay: int = after_latest_order_fill_delay
         self.total_balance_during_the_latest_detected_change: float = None
+        self.total_balance_before_the_latest_detected_change: float = None
+        self.latest_balance_change_detection_timestamp: float = None
 
     def can_the_total_base_balance_be_checked_now(self) -> bool:
         """
@@ -335,26 +337,34 @@ class MakerTotalBaseBalanceChecker:
         Returns:
             bool: True if a meaningful change in balance is detected, otherwise False.
         """
-        return_value = False
+        # return_value = False
         
         if self.can_the_total_base_balance_be_checked_now():
+            
             # Update the timestamp of the latest balance check
             self.latest_balance_check_timestamp = time.time()
-            # Calculate the percentage difference
-            difference_percentage = abs(current_base_total - starting_base_total) / starting_base_total * 100
-                       
+
+            if starting_base_total is None:
+                return False            
+            
             if self.total_balance_during_the_latest_detected_change is None:
-                if difference_percentage > meaningful_difference_in_perc:
-                    return_value = True
-            else:    
-                latest_difference_percentage = abs(current_base_total - self.total_balance_during_the_latest_detected_change) / self.total_balance_during_the_latest_detected_change * 100
-                if latest_difference_percentage > meaningful_difference_in_perc and difference_percentage > meaningful_difference_in_perc: 
-                    return_value = True                
-
-            if return_value:
+                previous_balance = starting_base_total
+            else:
+                previous_balance = self.total_balance_during_the_latest_detected_change    
+            
+            # Calculate the percentage difference
+            real_value_difference = current_base_total - previous_balance
+            difference_percentage = abs(real_value_difference) / starting_base_total * 100
+                       
+            if difference_percentage > meaningful_difference_in_perc:
+                
                 self.total_balance_during_the_latest_detected_change = current_base_total               
+                self.total_balance_before_the_latest_detected_change = previous_balance
+                self.latest_balance_change_detection_timestamp = time.time()
 
-        return return_value
+                return True
+
+        return False
 
 
 class CrossMmCustom(ScriptStrategyBase):
@@ -2036,7 +2046,7 @@ class CrossMmCustom(ScriptStrategyBase):
         if not self.base_balance_checker.check_if_the_balance_changed(self.starting_base_total, self.base_total, meaningful_difference_in_perc=self.total_base_change_notification_limit):
             return
         if notify:
-            self.logger().notify(f"The total base balance changed for more than {self.total_base_change_notification_limit}%, from starting {self.starting_base_total} to {self.base_total} {self.maker_base_symbol}")    
+            self.logger().notify(f"The total base balance changed for more than {self.total_base_change_notification_limit}%, from starting {self.base_balance_checker.total_balance_before_the_latest_detected_change} to {self.base_total} {self.maker_base_symbol}")    
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):
 
