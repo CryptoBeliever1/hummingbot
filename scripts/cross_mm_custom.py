@@ -317,17 +317,7 @@ class MakerTotalBaseBalanceChecker:
     def check_if_the_balance_changed(self, starting_base_total: float, current_base_total: float, 
                                      meaningful_difference_in_perc: float = 0.1) -> bool:
         """
-        Checks if the total base balance has changed by more than the specified meaningful percentage.
-
-        This method first verifies if the balance check conditions are met using 
-        `can_the_total_base_balance_be_checked_now`. If the conditions are satisfied:
-        - It updates the `latest_balance_check_timestamp` to the current time.
-        - It calculates the percentage difference between `starting_base_total` and `current_base_total`.
-        - If no prior balance change has been recorded (`total_balance_during_the_latest_detected_change` is None),
-          it checks if the difference exceeds the specified meaningful percentage.
-        - If a prior balance change has been recorded, it compares the `current_base_total` with the 
-          balance during the last detected change and checks if the difference exceeds the meaningful percentage.
-        - If a meaningful change is detected, it updates `total_balance_during_the_latest_detected_change`.
+        Checks if the total base balance has changed from its previous state by more than the specified meaningful percentage.
 
         Args:
             starting_base_total (float): The starting value of the base total balance.
@@ -338,6 +328,11 @@ class MakerTotalBaseBalanceChecker:
             bool: True if a meaningful change in balance is detected, otherwise False.
         """
         # return_value = False
+
+        # We detect the total balance change not depending on how close the final value
+        # is to the initial starting balance (when the script started). Any consecutive
+        # changes (e.i. from 100 to 120 and then from 120 to 100) are detected unless 
+        # they are not meaningful.
         
         if self.can_the_total_base_balance_be_checked_now():
             
@@ -354,7 +349,7 @@ class MakerTotalBaseBalanceChecker:
             
             # Calculate the percentage difference
             real_value_difference = current_base_total - previous_balance
-            difference_percentage = abs(real_value_difference) / starting_base_total * 100
+            difference_percentage = abs(real_value_difference) / previous_balance * 100
                        
             if difference_percentage > meaningful_difference_in_perc:
                 
