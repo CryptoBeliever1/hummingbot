@@ -267,6 +267,13 @@ class CrossMMCustomConfig(BaseClientModel):
          client_data=ClientFieldData(
         prompt_on_new=False, prompt=lambda mi: "Debug output from different parts of the code"
     ))
+    after_latest_balance_check_delay: int = Field(5, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Delay after the latest balance check (before the next balance check), in seconds"
+    ))
+    after_latest_order_fill_delay: int = Field(130, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Delay after the latest order fill (before the next balance check), in seconds"
+    ))
+
 
 s_decimal_nan = Decimal("NaN")
 
@@ -282,7 +289,7 @@ class MakerTotalBaseBalanceChecker:
         after_latest_order_fill_delay (int): The delay in seconds after the latest order fill before it can be checked again.
     """
 
-    def __init__(self, after_latest_balance_check_delay: int = 3, after_latest_order_fill_delay: int = 3):
+    def __init__(self, after_latest_balance_check_delay: int = 5, after_latest_order_fill_delay: int = 130):
         """
         Initializes the MakerTotalBaseBalanceChecker instance with the current timestamp for balance check
         and order fill, and the specified or default delay times.
@@ -739,7 +746,7 @@ class CrossMmCustom(ScriptStrategyBase):
             self.starting_base_total = self.base_total
             self.starting_quote_total = self.quote_total
 
-            self.base_balance_checker = MakerTotalBaseBalanceChecker(after_latest_balance_check_delay=6, after_latest_order_fill_delay=3)
+            self.base_balance_checker = MakerTotalBaseBalanceChecker(after_latest_balance_check_delay=self.after_latest_balance_check_delay, after_latest_order_fill_delay=self.after_latest_order_fill_delay)
 
 
             # loop = asyncio.get_event_loop()
@@ -783,6 +790,8 @@ class CrossMmCustom(ScriptStrategyBase):
             }
 
             self.bot_start_time_timestamp = time.time()
+
+            self.pending_base_amount_to_fix = Decimal(0)
 
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
@@ -989,6 +998,22 @@ class CrossMmCustom(ScriptStrategyBase):
     hedge_price_buy: {self.hedge_price_buy}
     """
             self.logger().info(output_message)
+
+    def min_taker_order_amount(self) -> float:
+        """
+        Calculate the minimum taker order amount based on trading rules fetched from and notional amount from config.
+
+        Returns:
+            float: The minimum taker order amount.
+        """
+        if self.trading_rules_min_taker_order_amount == 0:
+            return self.min_notional_taker_amount
+        
+        return max(
+            self.min_notional_taker_amount,
+            self.trading_rules_min_taker_order_amount
+        )
+
 
     # Here we calculate the exact order sizes taking into consideration all maker and taker balances
     # and the required untouched balances on maker and taker        
@@ -2042,6 +2067,11 @@ class CrossMmCustom(ScriptStrategyBase):
             return
         if notify:
             self.logger().notify(f"\nThe total base balance changed for more than {self.total_base_change_notification_limit}%, from {self.base_balance_checker.total_balance_before_the_latest_detected_change} to {self.base_total} {self.maker_base_symbol}\n(diff: {Decimal(str(self.base_total)) - Decimal(str(self.base_balance_checker.total_balance_before_the_latest_detected_change))})\nThe start balance was: {self.starting_base_total} {self.maker_base_symbol}")    
+
+    def correct_total_base_balance(self):
+        base_amount_difference_from_start_till_now = Decimal(str(self.base_total)) - Decimal(str(self.starting_base_total))
+        if base_amount_difference_from_start_till_now < Decimal(str(self.min_taker_order_amount())):
+            self.pending_base_amount_to_fix = base_amount_difference_from_start_till_now
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):
 
