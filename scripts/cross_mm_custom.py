@@ -228,8 +228,8 @@ class CrossMMCustomConfig(BaseClientModel):
     maker_min_balance_quote: float = Field(0, client_data=ClientFieldData(
         prompt_on_new=True, prompt=lambda mi: "Minimum balance for maker in quote currency"
     ))
-    total_base_change_notification_limit: float = Field(0.01, client_data=ClientFieldData(
-        prompt_on_new=False, prompt=lambda mi: "Total base change notification limit"
+    total_base_change_notification_limit: float = Field(0.00001, client_data=ClientFieldData(
+        prompt_on_new=True, prompt=lambda mi: "Total base change detection and notification lower limit, in amount base symbol. Recommended to set to the min base increment (min from maker and taker)"
     ))
     previous_speed_limit: float = Field(0.17, client_data=ClientFieldData(
         prompt_on_new=False, prompt=lambda mi: "Previous speed limit in percentage per millisecond"
@@ -276,6 +276,8 @@ class CrossMMCustomConfig(BaseClientModel):
 
 
 s_decimal_nan = Decimal("NaN")
+s_decimal_0 = Decimal("0")
+# s_decimal_min = 
 
 class MakerTotalBaseBalanceChecker:
     """
@@ -299,7 +301,9 @@ class MakerTotalBaseBalanceChecker:
             after_latest_order_fill_delay (int): Delay in seconds after the latest order fill before it can be checked again (default 3).
         """
         self.latest_balance_check_timestamp: float = time.time()
-        self.latest_order_fill_timestamp: float = time.time()
+        
+        # not to wait for the delay right after the script start if no orders filled
+        self.latest_order_fill_timestamp: float = (time.time() - float(after_latest_order_fill_delay))
         self.after_latest_balance_check_delay: int = after_latest_balance_check_delay
         self.after_latest_order_fill_delay: int = after_latest_order_fill_delay
         self.total_balance_during_the_latest_detected_change: float = None
@@ -322,14 +326,14 @@ class MakerTotalBaseBalanceChecker:
                 time_since_order_fill >= self.after_latest_order_fill_delay)
 
     def check_if_the_balance_changed(self, starting_base_total: float, current_base_total: float, 
-                                     meaningful_difference_in_perc: float = 0.1) -> bool:
+                                     meaningful_difference_in_base_symbol: float = 0.1) -> bool:
         """
-        Checks if the total base balance has changed from its previous state by more than the specified meaningful percentage.
+        Checks if the total base balance has changed from its previous state or from the starting value by more than the specified meaningful percentage.
 
         Args:
             starting_base_total (float): The starting value of the base total balance.
             current_base_total (float): The current value of the base total balance.
-            meaningful_difference_in_perc (float): The meaningful percentage difference to consider (default 0.1%).
+            meaningful_difference_in_base_symbol (float): The meaningful percentage difference to consider (default 0.1%).
 
         Returns:
             bool: True if a meaningful change in balance is detected, otherwise False.
@@ -356,9 +360,11 @@ class MakerTotalBaseBalanceChecker:
             
             # Calculate the percentage difference
             real_value_difference = current_base_total - previous_balance
-            difference_percentage = abs(real_value_difference) / previous_balance * 100
+
+            # real_value_difference_from_starting_balance = current_base_total - starting_base_total
+            # difference_percentage = abs(real_value_difference) / previous_balance * 100
                        
-            if difference_percentage > meaningful_difference_in_perc:
+            if abs(real_value_difference)  >= meaningful_difference_in_base_symbol:
                 
                 self.total_balance_during_the_latest_detected_change = current_base_total               
                 self.total_balance_before_the_latest_detected_change = previous_balance
@@ -791,7 +797,9 @@ class CrossMmCustom(ScriptStrategyBase):
 
             self.bot_start_time_timestamp = time.time()
 
-            self.pending_base_amount_to_fix = Decimal(0)
+            # if the maker fill order was smaller than the allowed taker min order
+            # then this base amount will be added to the next taker order
+            self.pending_small_base_amount_to_fix: Decimal = Decimal("0")
 
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
@@ -1694,6 +1702,7 @@ class CrossMmCustom(ScriptStrategyBase):
 
         order_id_for_profits_calculation = None
 
+        ############### BUY ORDER ##################
         if filled_order is not None and event.trade_type == TradeType.BUY:
             order_message = self.format_filled_order_message(
                 filled_order.client_order_id, 
@@ -1724,12 +1733,17 @@ class CrossMmCustom(ScriptStrategyBase):
 
             taker_sell_order_amount = event.amount
 
+            # correcting base balance for small value of unmatched small maker orders
+            if self.pending_small_base_amount_to_fix > Decimal("0"):
+                taker_sell_order_amount += self.pending_small_base_amount_to_fix
+                self.pending_small_base_amount_to_fix = Decimal("0")
+                self.logger().notify(f"correcting taker buy order amount. New value: {taker_sell_order_amount}")
+
             # check if there's enough base balance on taker
             if event.amount > Decimal(str(self.taker_base_free)):
                 taker_sell_order_amount = Decimal(str(self.taker_base_free))
                 self.logger().info(f"Correcting SELL LIMIT amount on taker to {taker_sell_order_amount} because the quote balance on taker is not enough")
-
-
+                
             
             
             sell_order = OrderCandidate(trading_pair=self.taker_pair, is_maker=False, order_type=OrderType.LIMIT, 
@@ -1752,6 +1766,7 @@ class CrossMmCustom(ScriptStrategyBase):
                     self.logger().info(f"Sending TAKER SELL order for {taker_sell_order_amount} {filled_order.base_currency} at price: {sell_price_with_slippage} {filled_order.quote_currency}")
                     # self.logger().info(f"Order fills profits: {self.order_fills_profits_pairs}")
         
+        ################# SELL ORDER #################
         elif filled_order is not None and event.trade_type == TradeType.SELL:
             order_message = self.format_filled_order_message(
                 filled_order.client_order_id, 
@@ -1782,6 +1797,11 @@ class CrossMmCustom(ScriptStrategyBase):
 
             taker_buy_order_amount = event.amount
 
+            # correcting base balance for small value of unmatched small maker orders
+            if self.pending_small_base_amount_to_fix < Decimal("0"):
+                taker_buy_order_amount += abs(self.pending_small_base_amount_to_fix)
+                self.pending_small_base_amount_to_fix = Decimal("0")
+                self.logger().notify(f"correcting taker buy order amount. New value: {taker_buy_order_amount}")
 
             # check if there's enough quote balance on taker
             if Decimal(str(self.taker_quote_free)) < Decimal(event.amount) * Decimal(buy_price_with_slippage):
@@ -2063,15 +2083,35 @@ class CrossMmCustom(ScriptStrategyBase):
             self.telegram_utils.send_unformatted_message(message)
 
     def check_and_correct_total_base_balance(self, notify=True, fix_balance=False, debug_output=False):
-        if not self.base_balance_checker.check_if_the_balance_changed(self.starting_base_total, self.base_total, meaningful_difference_in_perc=self.total_base_change_notification_limit):
+        if not self.base_balance_checker.check_if_the_balance_changed(self.starting_base_total, self.base_total, meaningful_difference_in_base_symbol=self.total_base_change_notification_limit):
             return
-        if notify:
-            self.logger().notify(f"\nThe total base balance changed for more than {self.total_base_change_notification_limit}%, from {self.base_balance_checker.total_balance_before_the_latest_detected_change} to {self.base_total} {self.maker_base_symbol}\n(diff: {Decimal(str(self.base_total)) - Decimal(str(self.base_balance_checker.total_balance_before_the_latest_detected_change))})\nThe start balance was: {self.starting_base_total} {self.maker_base_symbol}")    
+        
+        # the latest change from previous to current values
+        base_amount_difference_from_previous_change_till_now = Decimal(str(self.base_total)) - Decimal(str(self.base_balance_checker.total_balance_before_the_latest_detected_change))
 
-    def correct_total_base_balance(self):
+        # the difference between the start and current values
         base_amount_difference_from_start_till_now = Decimal(str(self.base_total)) - Decimal(str(self.starting_base_total))
-        if base_amount_difference_from_start_till_now < Decimal(str(self.min_taker_order_amount())):
-            self.pending_base_amount_to_fix = base_amount_difference_from_start_till_now
+
+        # notify about the changes bigger than min taker amount increment, do not notify
+        # about the 'dust' changes and changes related to float inaccuraces
+        if (notify and 
+            abs(base_amount_difference_from_previous_change_till_now) >= self.taker_rules.min_base_amount_increment and
+            abs(base_amount_difference_from_start_till_now) >= self.taker_rules.min_base_amount_increment
+            ):
+            self.logger().notify(f"\nThe total base balance changed for more than {self.total_base_change_notification_limit} {self.maker_base_symbol}, from {self.base_balance_checker.total_balance_before_the_latest_detected_change} to {self.base_total} {self.maker_base_symbol}\n(diff: {base_amount_difference_from_previous_change_till_now})\nThe start balance was: {self.starting_base_total} {self.maker_base_symbol}\nThe diff. from the start bal.: {base_amount_difference_from_start_till_now}")
+        
+        
+        # self.logger().notify(f"min taker order amount: {Decimal(str(self.min_taker_order_amount()))}, condition result {base_amount_difference_from_start_till_now} < {Decimal(str(self.min_taker_order_amount()))} = {base_amount_difference_from_start_till_now < Decimal(str(self.min_taker_order_amount()))}")
+        
+        # do not try to fix extra small changes, if they are smaller than the min taker amount increment
+        if abs(base_amount_difference_from_start_till_now) < self.taker_rules.min_base_amount_increment:
+            return
+
+        if abs(base_amount_difference_from_start_till_now) < Decimal(str(self.min_taker_order_amount())):
+            # add verification of unfilled maker small orders
+            self.pending_small_base_amount_to_fix = base_amount_difference_from_start_till_now            
+            
+            self.logger().notify(f"\nDetected small balance change. New fix amount: {self.pending_small_base_amount_to_fix}")
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):
 
