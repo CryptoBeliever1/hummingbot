@@ -273,6 +273,9 @@ class CrossMMCustomConfig(BaseClientModel):
     after_latest_order_fill_delay: int = Field(130, client_data=ClientFieldData(
         prompt_on_new=False, prompt=lambda mi: "Delay after the latest order fill (before the next balance check), in seconds"
     ))
+    notify_about_rate_limit_exceeding: bool = Field(False, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Send telegram notifications if API rate limit custom counter is exceeded for maker"
+    ))
 
 
 s_decimal_nan = Decimal("NaN")
@@ -800,6 +803,8 @@ class CrossMmCustom(ScriptStrategyBase):
             # if the maker fill order was smaller than the allowed taker min order
             # then this base amount will be added to the next taker order
             self.pending_small_base_amount_to_fix: Decimal = Decimal("0")
+
+            self.notify_about_rate_limit_exceeding = getattr(self, 'notify_about_rate_limit_exceeding', False)
 
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
@@ -1737,7 +1742,11 @@ class CrossMmCustom(ScriptStrategyBase):
             if self.pending_small_base_amount_to_fix > Decimal("0"):
                 taker_sell_order_amount += self.pending_small_base_amount_to_fix
                 self.pending_small_base_amount_to_fix = Decimal("0")
-                self.logger().notify(f"correcting taker buy order amount. New value: {taker_sell_order_amount}")
+                
+                message = f"Correcting taker SELL order amount. New value: {taker_sell_order_amount}"
+                # self.logger().notify(message)
+
+                self.send_beautiful_message_to_log_and_telegram(message, message)
 
             # check if there's enough base balance on taker
             if event.amount > Decimal(str(self.taker_base_free)):
@@ -1801,7 +1810,12 @@ class CrossMmCustom(ScriptStrategyBase):
             if self.pending_small_base_amount_to_fix < Decimal("0"):
                 taker_buy_order_amount += abs(self.pending_small_base_amount_to_fix)
                 self.pending_small_base_amount_to_fix = Decimal("0")
-                self.logger().notify(f"correcting taker buy order amount. New value: {taker_buy_order_amount}")
+                # self.logger().notify(f"correcting taker buy order amount. New value: {taker_buy_order_amount}")
+
+                message = f"Correcting taker BUY order amount. New value: {taker_buy_order_amount}"
+                # self.logger().notify(message)
+
+                self.send_beautiful_message_to_log_and_telegram(message, message)                
 
             # check if there's enough quote balance on taker
             if Decimal(str(self.taker_quote_free)) < Decimal(event.amount) * Decimal(buy_price_with_slippage):
@@ -2080,7 +2094,8 @@ class CrossMmCustom(ScriptStrategyBase):
             message = f"Rate Count Max limit exceeded ({rate_count} > {self.rate_count_max_limit}). Pausing for {delay / 1000:.3g} seconds."
             # \n Rate_count_timestamp: {self.connectors[self.maker].rate_count_update_timestamp}\n"
             self.logger().info(message)
-            self.telegram_utils.send_unformatted_message(message)
+            if self.notify_about_rate_limit_exceeding:
+                self.telegram_utils.send_unformatted_message(message)
 
     def check_and_correct_total_base_balance(self, notify=True, fix_balance=False, debug_output=False):
         if not self.base_balance_checker.check_if_the_balance_changed(self.starting_base_total, self.base_total, meaningful_difference_in_base_symbol=self.total_base_change_notification_limit):
@@ -2098,7 +2113,11 @@ class CrossMmCustom(ScriptStrategyBase):
             abs(base_amount_difference_from_previous_change_till_now) >= self.taker_rules.min_base_amount_increment and
             abs(base_amount_difference_from_start_till_now) >= self.taker_rules.min_base_amount_increment
             ):
-            self.logger().notify(f"\nThe total base balance changed for more than {self.total_base_change_notification_limit} {self.maker_base_symbol}, from {self.base_balance_checker.total_balance_before_the_latest_detected_change} to {self.base_total} {self.maker_base_symbol}\n(diff: {base_amount_difference_from_previous_change_till_now})\nThe start balance was: {self.starting_base_total} {self.maker_base_symbol}\nThe diff. from the start bal.: {base_amount_difference_from_start_till_now}")
+            message = f"The total base balance changed for more than {self.total_base_change_notification_limit} {self.maker_base_symbol}, from {self.base_balance_checker.total_balance_before_the_latest_detected_change} to {self.base_total} {self.maker_base_symbol}\n(diff: {base_amount_difference_from_previous_change_till_now})\nThe start balance was: {self.starting_base_total} {self.maker_base_symbol}\nThe diff. from the start bal.: {base_amount_difference_from_start_till_now}"
+            
+            self.send_beautiful_message_to_log_and_telegram(message, message)
+
+
         
         
         # self.logger().notify(f"min taker order amount: {Decimal(str(self.min_taker_order_amount()))}, condition result {base_amount_difference_from_start_till_now} < {Decimal(str(self.min_taker_order_amount()))} = {base_amount_difference_from_start_till_now < Decimal(str(self.min_taker_order_amount()))}")
@@ -2111,7 +2130,10 @@ class CrossMmCustom(ScriptStrategyBase):
             # add verification of unfilled maker small orders
             self.pending_small_base_amount_to_fix = base_amount_difference_from_start_till_now            
             
-            self.logger().notify(f"\nDetected small balance change. New fix amount: {self.pending_small_base_amount_to_fix}")
+            message = f"Detected small balance change. New fix amount: {self.pending_small_base_amount_to_fix}"
+            # self.logger().notify(message)
+
+            self.send_beautiful_message_to_log_and_telegram(message, message)
 
     def get_order_book_dict(self, exchange: str, trading_pair: str, depth: int = 50):
 
@@ -2422,5 +2444,10 @@ class CrossMmCustom(ScriptStrategyBase):
             return output_value
         if function_name in self.debug_output_control:
             output_value = self.debug_output_control[function_name]
-        return output_value    
+        return output_value
+
+    def send_beautiful_message_to_log_and_telegram(self, message_to_log: str, message_to_telegram=None):
+        self.logger().info(message_to_log)
+        if message_to_telegram is not None:    
+            self.telegram_utils.send_unformatted_message(message_to_telegram)            
                        
