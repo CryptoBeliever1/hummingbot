@@ -276,6 +276,9 @@ class CrossMMCustomConfig(BaseClientModel):
     notify_about_rate_limit_exceeding: bool = Field(False, client_data=ClientFieldData(
         prompt_on_new=False, prompt=lambda mi: "Send telegram notifications if API rate limit custom counter is exceeded for maker"
     ))
+    enable_small_base_balance_corrections: bool = Field(False, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Is small base balance (less than min taker increment) changes correction needed"
+    ))
 
 
 s_decimal_nan = Decimal("NaN")
@@ -805,6 +808,7 @@ class CrossMmCustom(ScriptStrategyBase):
             self.pending_small_base_amount_to_fix: Decimal = Decimal("0")
 
             self.notify_about_rate_limit_exceeding = getattr(self, 'notify_about_rate_limit_exceeding', False)
+            self.enable_small_base_balance_corrections = getattr(self, 'enable_small_base_balance_corrections', False)
 
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
@@ -1532,9 +1536,9 @@ class CrossMmCustom(ScriptStrategyBase):
             if order.client_order_id == event.order_id:
                 self.idle_timers.append(Timer(name="failed_order_idle_timer", duration=delay))
                 
-                notif_text = f"Maker order {order.client_order_id} creation failed, going idle for {delay/1000} seconds"
+                notif_text = f"Maker order {order.client_order_id} failed, going idle for {delay/1000} seconds"
                 self.telegram_utils.send_unformatted_message(notif_text)
-                self.telegram_utils.send_unformatted_message(self.get_latest_exception_traceback())
+                self.telegram_utils.send_unformatted_message(f"Exception: {self.get_latest_exception_traceback()}")
 
         
         # orders_from_all_connectors = self.order_tracker.tracked_limit_orders
@@ -1739,14 +1743,15 @@ class CrossMmCustom(ScriptStrategyBase):
             taker_sell_order_amount = event.amount
 
             # correcting base balance for small value of unmatched small maker orders
-            if self.pending_small_base_amount_to_fix > Decimal("0"):
-                taker_sell_order_amount += self.pending_small_base_amount_to_fix
-                self.pending_small_base_amount_to_fix = Decimal("0")
-                
-                message = f"Correcting taker SELL order amount. New value: {taker_sell_order_amount}"
-                # self.logger().notify(message)
+            if self.enable_small_base_balance_corrections:
+                if self.pending_small_base_amount_to_fix > Decimal("0"):
+                    taker_sell_order_amount += self.pending_small_base_amount_to_fix
+                    self.pending_small_base_amount_to_fix = Decimal("0")
+                    
+                    message = f"Correcting taker SELL order amount. New value: {taker_sell_order_amount}"
+                    # self.logger().notify(message)
 
-                self.send_beautiful_message_to_log_and_telegram(message, message)
+                    self.send_beautiful_message_to_log_and_telegram(message, message)
 
             # check if there's enough base balance on taker
             if event.amount > Decimal(str(self.taker_base_free)):
@@ -1807,15 +1812,16 @@ class CrossMmCustom(ScriptStrategyBase):
             taker_buy_order_amount = event.amount
 
             # correcting base balance for small value of unmatched small maker orders
-            if self.pending_small_base_amount_to_fix < Decimal("0"):
-                taker_buy_order_amount += abs(self.pending_small_base_amount_to_fix)
-                self.pending_small_base_amount_to_fix = Decimal("0")
-                # self.logger().notify(f"correcting taker buy order amount. New value: {taker_buy_order_amount}")
+            if self.enable_small_base_balance_corrections:
+                if self.pending_small_base_amount_to_fix < Decimal("0"):
+                    taker_buy_order_amount += abs(self.pending_small_base_amount_to_fix)
+                    self.pending_small_base_amount_to_fix = Decimal("0")
+                    # self.logger().notify(f"correcting taker buy order amount. New value: {taker_buy_order_amount}")
 
-                message = f"Correcting taker BUY order amount. New value: {taker_buy_order_amount}"
-                # self.logger().notify(message)
+                    message = f"Correcting taker BUY order amount. New value: {taker_buy_order_amount}"
+                    # self.logger().notify(message)
 
-                self.send_beautiful_message_to_log_and_telegram(message, message)                
+                    self.send_beautiful_message_to_log_and_telegram(message, message)                
 
             # check if there's enough quote balance on taker
             if Decimal(str(self.taker_quote_free)) < Decimal(event.amount) * Decimal(buy_price_with_slippage):
@@ -2121,7 +2127,8 @@ class CrossMmCustom(ScriptStrategyBase):
         
         
         # self.logger().notify(f"min taker order amount: {Decimal(str(self.min_taker_order_amount()))}, condition result {base_amount_difference_from_start_till_now} < {Decimal(str(self.min_taker_order_amount()))} = {base_amount_difference_from_start_till_now < Decimal(str(self.min_taker_order_amount()))}")
-        
+        if not self.enable_small_base_balance_corrections:
+            return
         # do not try to fix extra small changes, if they are smaller than the min taker amount increment
         if abs(base_amount_difference_from_start_till_now) < self.taker_rules.min_base_amount_increment:
             return
