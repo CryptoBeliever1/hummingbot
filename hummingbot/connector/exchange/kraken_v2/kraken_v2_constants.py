@@ -49,6 +49,7 @@ ASSET_PAIRS_PATH_URL = "/0/public/AssetPairs"
 TIME_PATH_URL = "/0/public/Time"
 GET_TOKEN_PATH_URL = "/0/private/GetWebSocketsToken"
 ADD_ORDER_PATH_URL = "/0/private/AddOrder"
+AMEND_ORDER_PATH_URL = "/0/private/AmendOrder"
 CANCEL_ORDER_PATH_URL = "/0/private/CancelOrder"
 BALANCE_PATH_URL = "/0/private/Balance"
 OPEN_ORDERS_PATH_URL = "/0/private/OpenOrders"
@@ -129,7 +130,7 @@ PUBLIC_API_LIMITS = [
         limit=PUBLIC_ENDPOINT_LIMIT,
         time_interval=PUBLIC_ENDPOINT_LIMIT_INTERVAL,
         linked_limits=[LinkedLimitWeightPair(PUBLIC_ENDPOINT_LIMIT_ID)],
-    ),
+    ),   
     # WebSocket Connection Limit
     RateLimit(limit_id=WS_CONNECTION_LIMIT_ID,
               limit=150,

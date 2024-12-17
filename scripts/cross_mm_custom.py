@@ -7,8 +7,8 @@ import time
 import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from decimal import Decimal
-from typing import Dict, Union
+from decimal import Decimal, InvalidOperation
+from typing import Dict, Optional, TypedDict, Union
 
 import pandas as pd
 from pydantic import Field
@@ -41,6 +41,12 @@ from scripts.utility.telegram_utils import TelegramUtils
 # from hummingbot.core.utils.trading_pair import TradingPair
 # from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
 # from hummingbot.connector.connector_base import ConnectorBase
+
+class OrderAmendedPreviouslyDict(TypedDict, total=True):
+    order_id: Optional[str]
+    price: Optional[Decimal]
+    amount: Optional[Decimal]
+    amendment_try_timestamp: Optional[float]
 
 class CrossMMCustomConfig(BaseClientModel):
     script_file_name: str = Field(default_factory=lambda: os.path.basename(__file__))
@@ -278,6 +284,9 @@ class CrossMMCustomConfig(BaseClientModel):
     ))
     enable_small_base_balance_corrections: bool = Field(False, client_data=ClientFieldData(
         prompt_on_new=False, prompt=lambda mi: "Is small base balance (less than min taker increment) changes correction needed"
+    ))
+    enable_amend_order_for_kraken_v2: bool = Field(True, client_data=ClientFieldData(
+        prompt_on_new=False, prompt=lambda mi: "Enable amend order feature instead of cancel and create for kraken_v2 connector"
     ))
 
 
@@ -674,22 +683,36 @@ class CrossMmCustom(ScriptStrategyBase):
             return        
         if self.flow_mode == "sell":
             return
+        
+        if self.skip_buy_order_flow_flag:
+            self.skip_order_flow(side="buy", activate=False)
+            return
+        
         if self.active_buy_order is None:
             self.create_new_maker_order(side=TradeType.BUY, debug_output=False)
         elif self.edit_order_condition(side=TradeType.BUY, debug_output=False):
-            buy_order_edit_result = self.edit_order(order=self.active_buy_order, debug_output=False)
+            
+            if self.amend_condition():
+                buy_order_edit_result = self.amend_buy_order(debug_output=True)
+            else:
+                buy_order_edit_result = self.edit_order(order=self.active_buy_order, debug_output=False)
             
             if buy_order_edit_result == "cancel":
                 self.custom_cancel_order(order=self.active_buy_order, debug_output=False)
             
-            if self.cancel_order_condition(side=TradeType.BUY, debug_output=False):
-                self.custom_cancel_order(order=self.active_buy_order, debug_output=False) 
+            # if self.cancel_order_condition(side=TradeType.BUY, debug_output=False):
+            #     self.custom_cancel_order(order=self.active_buy_order, debug_output=False) 
 
     def sell_order_flow(self):
         if self.go_passive():
             return        
         if self.flow_mode == "buy":
             return
+
+        if self.skip_sell_order_flow_flag:
+            self.skip_order_flow(side="sell", activate=False)
+            return
+
         if self.active_sell_order is None:
             self.create_new_maker_order(side=TradeType.SELL, debug_output=False)
         elif self.edit_order_condition(side=TradeType.SELL, debug_output=False):
@@ -698,8 +721,8 @@ class CrossMmCustom(ScriptStrategyBase):
             if sell_order_edit_result == "cancel":
                 self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
             
-            if self.cancel_order_condition(side=TradeType.SELL, debug_output=False):
-                self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
+            # if self.cancel_order_condition(side=TradeType.SELL, debug_output=False):
+            #     self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
 
     def get_instance_id(self):
         return self.connectors[self.maker]._client_config.hb_config.instance_id
@@ -779,6 +802,9 @@ class CrossMmCustom(ScriptStrategyBase):
                 self.trading_rules_min_taker_order_amount = float(self.taker_rules.min_order_size)                
 
 
+            self.sell_order_exchange_id = None
+            self.buy_order_exchange_id = None
+            
             telegram_string = self.telegram_utils.bot_started_string(version, self.strategy, self.maker_fee, self.taker_fee, self.flow_mode)
             self.hummingbot.notify(telegram_string)
             self.logger().info(telegram_string)
@@ -809,6 +835,28 @@ class CrossMmCustom(ScriptStrategyBase):
 
             self.notify_about_rate_limit_exceeding = getattr(self, 'notify_about_rate_limit_exceeding', False)
             self.enable_small_base_balance_corrections = getattr(self, 'enable_small_base_balance_corrections', False)
+            self.enable_amend_order_for_kraken_v2 = getattr(self, 'enable_amend_order_for_kraken_v2', False)
+
+            if self.maker != "kraken_v2":
+                self.enable_amend_order_for_kraken_v2 = False
+
+            self.buy_order_amended_previously: OrderAmendedPreviouslyDict = {
+                "order_id": None,
+                "price": None,
+                "amount": None,
+                "amendment_try_timestamp": None,
+            }
+            self.sell_order_amended_previously: OrderAmendedPreviouslyDict = {
+                "order_id": None,
+                "price": None,
+                "amount": None,
+                "amendment_try_timestamp": None,
+            }
+            self.skip_buy_order_flow_flag: bool = False
+            self.skip_sell_order_flow_flag: bool = False
+
+            self.in_flight_buy_order = None
+            self.in_flight_sell_order = None
 
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
@@ -1094,7 +1142,8 @@ class CrossMmCustom(ScriptStrategyBase):
 
         # trying to get active orders through exchange entity. 
         # It works but the order tracking and balance functionality fails with this approach
-        # self.active_in_flight_orders = self.connectors[self.maker].in_flight_orders
+        self.active_in_flight_orders = self.connectors[self.maker].in_flight_orders
+        # self.logger().info(f"######### In Flight Orders: {self.active_in_flight_orders} ########")
         # self.active_in_flight_orders_converted_to_limit = [order.to_limit_order() for order in self.active_in_flight_orders.values()]        
         # self.active_limit_orders = [order.to_limit_order() for order in self.active_in_flight_orders.values()]
 
@@ -1121,6 +1170,57 @@ class CrossMmCustom(ScriptStrategyBase):
 
         if active_buy_orders:
             self.active_buy_order = active_buy_orders[0]
+            # self.logger().info(f"######### Active BUY Limit Order: {self.active_buy_order.client_order_id}, order price: {self.active_buy_order.price} ########")
+            self.in_flight_buy_order = self.active_in_flight_orders.get(self.active_buy_order.client_order_id)
+                
+            if self.amend_condition():
+                self.buy_order_exchange_id = self.in_flight_buy_order.exchange_order_id
+
+                # self.logger().info(f"######### Active BUY Limit Order: {self.active_buy_order.client_order_id}, order price: {self.active_buy_order.price} ########")
+
+                # We check if the order has been amended successfully by comparing 
+                # the price and amount previously sent to the exchange with 
+                # the current in_flight_order values
+                # If the values are different we just cancel order and skip to the next tick
+                # to create a new order
+                if self.buy_order_amended_previously["order_id"] == self.active_buy_order.client_order_id and (
+                        (self.buy_order_amended_previously["price"] is not None 
+                            and 
+                        self.buy_order_amended_previously["price"] != self.in_flight_buy_order.price
+                        ) 
+                            or 
+                        (self.buy_order_amended_previously["amount"] is not None 
+                            and 
+                        self.buy_order_amended_previously["amount"] != self.in_flight_buy_order.amount
+                        )
+                    ):
+                    vars_message = (
+                        f'self.buy_order_amended_previously["order_id"] = {self.buy_order_amended_previously["order_id"]}\n'
+                        f'self.active_buy_order.client_order_id = {self.active_buy_order.client_order_id}\n'
+                        f'self.buy_order_amended_previously["price"] = {self.buy_order_amended_previously["price"]}\n'
+                        f'self.in_flight_buy_order.price = {self.in_flight_buy_order.price}\n'
+                        f'self.buy_order_amended_previously["amount"] = {self.buy_order_amended_previously["amount"]}\n'
+                        f'self.in_flight_buy_order.amount = {self.in_flight_buy_order.amount}\n'
+                        f'self.buy_order_amended_previously["amendment_try_timestamp"] = {self.buy_order_amended_previously["amendment_try_timestamp"]}'
+                    )    
+
+                    self.logger().notify(f"BUY order was not amended successfully, skipping to the next tick and canceling it. Report:\n{vars_message}")
+                    self.custom_cancel_order(self.active_buy_order)
+                    self.skip_order_flow(side="buy", activate=True)
+
+                # self.logger().info(f"######### In Flight BUY Order: {self.buy_order_exchange_id}, order price: {self.in_flight_buy_order.price} ########")
+
+            # a protection from not finding the corresponding in_flight_order.
+            # if it's not found everything just goes with create and cancel, without 'amend' feature
+            
+            if self.in_flight_buy_order is not None:
+                self.in_flight_buy_order_limit = self.in_flight_buy_order.to_limit_order()
+                # self.logger().info(f"self.active_buy_order: {self.active_buy_order}\nself.in_flight_buy_order_limit: {self.in_flight_buy_order_limit}")
+
+                self.active_buy_order = self.in_flight_buy_order_limit
+
+                # self.logger().info(f"self.active_buy_order after copying from flight order: {self.active_buy_order}")   
+
             if debug_output:
                 self.logger().info("There are active buy orders.")
                 self.logger().info(f"{self.active_buy_order}")
@@ -1131,12 +1231,31 @@ class CrossMmCustom(ScriptStrategyBase):
 
         if active_sell_orders:
             self.active_sell_order = active_sell_orders[0]
+            self.in_flight_sell_order = self.active_in_flight_orders.get(self.active_sell_order.client_order_id)
+            if self.in_flight_sell_order is not None:
+                self.sell_order_exchange_id = self.in_flight_sell_order.exchange_order_id            
             if debug_output:
                 self.logger().info("There are active sell orders.")
         else:
             self.active_sell_order = None
             if debug_output:
                 self.logger().info("There are no active sell orders.")
+
+    def amend_condition(self) -> bool:
+        result = self.in_flight_buy_order is not None and self.enable_amend_order_for_kraken_v2
+        return result
+
+    def skip_order_flow(self, side="buy", activate=False):
+        if activate:
+            if side == "buy":
+                self.skip_buy_order_flow_flag = True
+            else:
+                self.skip_sell_order_flow_flag = True
+        else:
+            if side == "buy":
+                self.skip_buy_order_flow_flag = False
+            else:
+                self.skip_sell_order_flow_flag = False
 
     def round_to_precision(self, value, precision, rounding_mode='ceil', return_string=True):
         # Calculate the scaling factor based on the precision
@@ -1156,7 +1275,7 @@ class CrossMmCustom(ScriptStrategyBase):
         # Divide by the scaling factor to shift back to the original number of decimal places
         result = rounded_value / scaling_factor
         if return_string:
-            result = str(result)
+            result = f"{result:.{precision}f}"
         return result
 
     def create_new_maker_order(self, side=TradeType.BUY, debug_output=False):
@@ -1494,6 +1613,60 @@ class CrossMmCustom(ScriptStrategyBase):
             self.sell_order_client_id_to_edit_in_current_tick_cycle = order.client_order_id
         
         # self.create_new_maker_order(side=new_order_side)
+    
+    def amend_buy_order(self, debug_output=False) -> Optional[str]:
+        # the below two vars are float
+        new_order_size = self.order_size_buy
+        new_order_price = self.planned_order_price_buy
+   
+        new_order_side = "BUY"
+        order_id = self.buy_order_exchange_id
+        try: 
+            new_order_size_decimal = Decimal(str(new_order_size))        
+        except (ValueError, InvalidOperation) as e:
+            self.logger().info(f"Amend Order: the planned {new_order_side} order size is not valid ({new_order_size}) - {e}")
+            return "cancel"
+        # we only check the order amount if it will be different than before
+        if self.active_buy_order.quantity != new_order_size_decimal:
+        
+            if not self.check_min_order_amount_for_maker_order_creation(new_order_size):
+                if debug_output:
+                    self.logger().info(f"Edit Order: the planned {new_order_side} order amount is too low: {new_order_size}, can't place a new order")
+                return "cancel"
+        else:
+            new_order_size_decimal = None
+
+        try: 
+            new_order_price_decimal = Decimal(
+                self.round_to_precision(new_order_price, self.order_price_precision, rounding_mode='floor'))        
+        except Exception as e:
+            self.logger().info(f"Amend Order: the planned {new_order_price} order price is not valid ({new_order_size}) - {e}")
+            return "cancel"
+
+        # self.logger().info(f"self.active_buy_order.price == new_order_price_decimal -> ({self.active_buy_order.price == new_order_price_decimal}\n{self.active_buy_order.price} == {new_order_price_decimal})")
+        
+        # it means there's nothing to update
+        if self.active_buy_order.price == new_order_price_decimal and new_order_size_decimal is None:
+            return
+
+        try:
+            amend_result = self.connectors[self.maker].amend_order(order_id, new_order_size_decimal, new_order_price_decimal)
+        except Exception as e:
+            error_message = f"Tried to amend order {order_id} buy failed. An error of type {type(e).__name__} occurred while AMENDING order: {e}"
+            self.logger().error(error_message, exc_info=True)
+            self.telegram_utils.send_unformatted_message(error_message)
+            return "cancel"
+
+        self.buy_order_amended_previously = {
+            "order_id": self.active_buy_order.client_order_id,
+            "amount": new_order_size_decimal,
+            "price": new_order_price_decimal,
+            "amendment_try_timestamp": time.time()
+        }
+
+        if debug_output:
+            self.logger().info(f"Amending {new_order_side} order {self.active_buy_order.client_order_id} ({order_id}). Amount: from {self.active_buy_order.quantity} to {new_order_size_decimal} and price: from {self.active_buy_order.price} to {new_order_price_decimal}")
+
 
     def cancel_all_active_limit_orders(self, debug_output=False):
         for order in self.active_limit_orders:
@@ -1519,6 +1692,8 @@ class CrossMmCustom(ScriptStrategyBase):
         # pass
 
     def did_cancel_order(self, event: OrderCancelledEvent):
+        if self.amend_condition():
+            return
         # self.logger().info(f"Catched Order cancel!!!")
         if (self.create_buy_order_after_cancel_in_current_tick_cycle == True 
             and self.buy_order_client_id_to_edit_in_current_tick_cycle == event.order_id):

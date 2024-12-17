@@ -332,6 +332,20 @@ class KrakenV2Exchange(ExchangePyBase):
             price=price))
         return order_id
 
+    def amend_order(self,
+             order_id: str,       
+             amount: Decimal,
+             price: Decimal,
+             **kwargs) -> str:
+        """
+        Creates a promise to amend a limit order.
+        """
+        safe_ensure_future(self._amend_order(
+            order_id=order_id,
+            amount=amount,
+            price=price))
+        return order_id
+
     async def get_asset_pairs(self) -> Dict[str, Any]:
         if not self._asset_pairs:
             asset_pairs = await self._api_request_with_retry(method=RESTMethod.GET,
@@ -370,6 +384,30 @@ class KrakenV2Exchange(ExchangePyBase):
 
         o_id = order_result["txid"][0]    
         return (o_id, self.current_timestamp)
+
+    async def _amend_order(self,
+                           order_id: str,
+                           amount: Decimal,
+                           price: Decimal,
+                           **kwargs) -> Tuple[str, float]:
+        data = {
+            "txid": order_id,
+        }        
+        if amount is None and price is None:
+            return False
+        if amount is not None:
+            data["order_qty"] = str(amount)
+        if price is not None:
+            data["limit_price"] = str(price)
+
+        # self.logger().info(f"Sending POST request: {data}")
+        order_result = await self._api_request_with_retry(RESTMethod.POST,
+                                                          CONSTANTS.AMEND_ORDER_PATH_URL,
+                                                          data=data,
+                                                          is_auth_required=True)
+
+        a_id = order_result["amend_id"]    
+        return (a_id, self.current_timestamp)
 
     async def _api_request_with_retry(self,
                                       method: RESTMethod,
@@ -778,6 +816,7 @@ class KrakenV2Exchange(ExchangePyBase):
         # self.logger().info(f"Received Order Message. Orders: {orders}")
         for order_msg in orders:
             # self.logger().info(f"Received Order Message. Order: {order_msg}")
+            
             client_order_id = str(order_msg.get("order_userref", ""))
             exchange_order_id = order_msg.get("order_id")
             tracked_order = self._order_tracker.all_updatable_orders.get(client_order_id)
@@ -787,10 +826,20 @@ class KrakenV2Exchange(ExchangePyBase):
                     f"Ignoring order message with client id {client_order_id}: not in in_flight_orders.")
                 continue
             
+            self.logger().info(f"Received Order Message. Order: {order_msg}")
+            
             if exchange_order_id is not None and tracked_order.exchange_order_id is None:
                 tracked_order.exchange_order_id = str(exchange_order_id)            
             
-            if "order_status" in order_msg:
+            if order_msg["exec_type"] == "amended":
+                if order_msg["amended"]:
+                    message = f"Order {client_order_id} amended. Price: from {tracked_order.price} to {str(order_msg['limit_price'])}, Amount: from {tracked_order.amount} to {str(order_msg['order_qty'])}. Ratecount: {order_msg.get('ratecount')}"
+                    tracked_order.amount = Decimal(str(order_msg["order_qty"]))
+                    tracked_order.price = Decimal(str(order_msg["limit_price"]))
+                    self.logger().info(f"{message}")
+                    # self.logger().info(f"Updated tracked order price: {self._order_tracker._in_flight_orders[client_order_id].price}")
+
+            if "order_status" in order_msg and order_msg["exec_type"] != "amended":
                 order_update = self._create_ws_order_update_with_order_status_data(order_status=order_msg,
                                                                                 order=tracked_order)
                 self._order_tracker.process_order_update(order_update=order_update)

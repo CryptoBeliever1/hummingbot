@@ -167,6 +167,12 @@ def _build_private_rate_limits(tier: KrakenV2APITier = KrakenV2APITier.STARTER) 
             time_interval=CONSTANTS.MATCHING_ENGINE_LIMIT_INTERVAL,
             linked_limits=[LinkedLimitWeightPair(CONSTANTS.MATCHING_ENGINE_LIMIT_ID)],
         ),
+        RateLimit(
+            limit_id=CONSTANTS.AMEND_ORDER_PATH_URL,
+            limit=MATCHING_ENGINE_LIMIT,
+            time_interval=CONSTANTS.MATCHING_ENGINE_LIMIT_INTERVAL,
+            linked_limits=[LinkedLimitWeightPair(CONSTANTS.MATCHING_ENGINE_LIMIT_ID)],
+        ),        
     ])
 
     return private_rate_limits
