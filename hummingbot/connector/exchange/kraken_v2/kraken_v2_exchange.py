@@ -336,6 +336,7 @@ class KrakenV2Exchange(ExchangePyBase):
              order_id: str,       
              amount: Decimal,
              price: Decimal,
+             trading_pair: str,
              **kwargs) -> str:
         """
         Creates a promise to amend a limit order.
@@ -343,7 +344,8 @@ class KrakenV2Exchange(ExchangePyBase):
         safe_ensure_future(self._amend_order(
             order_id=order_id,
             amount=amount,
-            price=price))
+            price=price,
+            trading_pair=trading_pair))
         return order_id
 
     async def get_asset_pairs(self) -> Dict[str, Any]:
@@ -389,6 +391,7 @@ class KrakenV2Exchange(ExchangePyBase):
                            order_id: str,
                            amount: Decimal,
                            price: Decimal,
+                           trading_pair: str,
                            **kwargs) -> Tuple[str, float]:
         data = {
             "txid": order_id,
@@ -396,8 +399,12 @@ class KrakenV2Exchange(ExchangePyBase):
         if amount is None and price is None:
             return False
         if amount is not None:
+#             amount = self.quantize_order_amount(trading_pair=trading_pair, amount=amount)
+
             data["order_qty"] = str(amount)
         if price is not None:
+#             price = self.quantize_order_price(trading_pair, price)
+        
             data["limit_price"] = str(price)
 
         # self.logger().info(f"Sending POST request: {data}")
@@ -406,8 +413,14 @@ class KrakenV2Exchange(ExchangePyBase):
                                                           data=data,
                                                           is_auth_required=True)
 
-        a_id = order_result["amend_id"]    
-        return (a_id, self.current_timestamp)
+        a_id = order_result.get("amend_id")
+        ret_dic = {
+            "amend_id": a_id,
+            # "amount": amount,
+            # "price": price,
+            # "amendment_try_timestamp": self.current_timestamp
+        }  
+        return ret_dic
 
     async def _api_request_with_retry(self,
                                       method: RESTMethod,
@@ -575,11 +588,13 @@ class KrakenV2Exchange(ExchangePyBase):
 
                         for item in data:
 
+                            # if exec_type is equal to "filled", it means this is a message
+                            # notifying about order completion. It's created exactly for that purpose.
                             # self.logger().info(f"Received a data Message from channel {channel}: {item}")
                             if "exec_type" in item:
                                 if item["exec_type"] in ["trade"]:
                                     trade_message.append(item)
-                                elif item["exec_type"] in ["filled", "pending_new"]:
+                                elif item["exec_type"] in ["pending_new"]:
                                     continue
                                 else:    
                                     order_message.append(item)                                   
@@ -605,7 +620,7 @@ class KrakenV2Exchange(ExchangePyBase):
 
     def _process_balance_message_ws(self, event_message):
         
-        self.logger().info(f"Got new Balance message: {event_message}")
+        # self.logger().info(f"Got new Balance message: {event_message}")
         event_message_type = event_message.get("type", None)        
         # for simplicity we process only "main" "spot" balances
         account = event_message.get("data", [])
@@ -657,7 +672,7 @@ class KrakenV2Exchange(ExchangePyBase):
             new_balance = Decimal(str(wallet["balance"]))
             self._account_balances[asset_name] = new_balance
 
-            self.logger().info(f"{asset_name} total balance updated. New: {new_balance}, Old: {previous_balance}")
+            # self.logger().info(f"{asset_name} total balance updated. New: {new_balance}, Old: {previous_balance}")
 
             # The available balance is approximate and is not always correct.
             # it will work well if no other bots are running on the same assets.
@@ -671,7 +686,7 @@ class KrakenV2Exchange(ExchangePyBase):
                 previous_available_balance + (new_balance - previous_balance)
             )
 
-            self.logger().info(f"{asset_name} available balance updated: New: {new_balance}, Old: {previous_available_balance}")
+            # self.logger().info(f"{asset_name} available balance updated: New: {new_balance}, Old: {previous_available_balance}")
 
     def _create_trade_update_with_order_fill_data(
             self,
@@ -786,6 +801,7 @@ class KrakenV2Exchange(ExchangePyBase):
             if not tracked_order:
                 self.logger().debug(f"Ignoring trade message with id {exchange_order_id}: not in in_flight_orders.")
             else:
+                # self.logger().info(f"Received a Trade Message. Order or Trade: {update}")
                 trade_update = self._create_ws_trade_update_with_order_fill_data(
                     order_fill=trade,
                     order=tracked_order)
@@ -833,7 +849,7 @@ class KrakenV2Exchange(ExchangePyBase):
             
             if order_msg["exec_type"] == "amended":
                 if order_msg["amended"]:
-                    message = f"Order {client_order_id} amended. Price: from {tracked_order.price} to {str(order_msg['limit_price'])}, Amount: from {tracked_order.amount} to {str(order_msg['order_qty'])}. Ratecount: {order_msg.get('ratecount')}"
+                    message = f"Amended order {client_order_id}. Price: from {tracked_order.price} to {str(order_msg['limit_price'])}, Amount: from {tracked_order.amount} to {str(order_msg['order_qty'])}. Ratecount: {order_msg.get('ratecount')}"
                     tracked_order.amount = Decimal(str(order_msg["order_qty"]))
                     tracked_order.price = Decimal(str(order_msg["limit_price"]))
                     self.logger().info(f"{message}")

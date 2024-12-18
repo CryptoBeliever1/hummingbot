@@ -44,6 +44,7 @@ from scripts.utility.telegram_utils import TelegramUtils
 
 class OrderAmendedPreviouslyDict(TypedDict, total=True):
     order_id: Optional[str]
+    amend_id: Optional[str]
     price: Optional[Decimal]
     amount: Optional[Decimal]
     amendment_try_timestamp: Optional[float]
@@ -675,7 +676,7 @@ class CrossMmCustom(ScriptStrategyBase):
     def custom_cancel_all_orders(self, debug_output=False):
         if self.active_buy_order is not None:
             self.custom_cancel_order(order=self.active_buy_order, debug_output=debug_output)
-        if self.active_buy_order is not None:    
+        if self.active_sell_order is not None:    
             self.custom_cancel_order(order=self.active_sell_order, debug_output=debug_output)
 
     def buy_order_flow(self):
@@ -692,8 +693,16 @@ class CrossMmCustom(ScriptStrategyBase):
             self.create_new_maker_order(side=TradeType.BUY, debug_output=False)
         elif self.edit_order_condition(side=TradeType.BUY, debug_output=False):
             
-            if self.amend_condition():
-                buy_order_edit_result = self.amend_buy_order(debug_output=True)
+            if self.amend_condition(self.in_flight_buy_order):
+                buy_order_edit_result = self.amend_order_any_side(
+                    order_side="BUY",
+                    order_size=self.order_size_buy,
+                    planned_order_price=self.planned_order_price_buy,
+                    order_exchange_id=self.buy_order_exchange_id,
+                    active_order=self.active_buy_order,
+                    amended_previously=self.buy_order_amended_previously,
+                    debug_output=True
+                )
             else:
                 buy_order_edit_result = self.edit_order(order=self.active_buy_order, debug_output=False)
             
@@ -716,8 +725,20 @@ class CrossMmCustom(ScriptStrategyBase):
         if self.active_sell_order is None:
             self.create_new_maker_order(side=TradeType.SELL, debug_output=False)
         elif self.edit_order_condition(side=TradeType.SELL, debug_output=False):
-            sell_order_edit_result = self.edit_order(order=self.active_sell_order, debug_output=False)
             
+            if self.amend_condition(self.in_flight_sell_order):
+                sell_order_edit_result = self.amend_order_any_side(
+                    order_side="SELL",
+                    order_size=self.order_size_sell,
+                    planned_order_price=self.planned_order_price_sell,
+                    order_exchange_id=self.sell_order_exchange_id,
+                    active_order=self.active_sell_order,
+                    amended_previously=self.sell_order_amended_previously,
+                    debug_output=True
+                )
+            else:
+                sell_order_edit_result = self.edit_order(order=self.active_sell_order, debug_output=False)
+
             if sell_order_edit_result == "cancel":
                 self.custom_cancel_order(order=self.active_sell_order, debug_output=False)
             
@@ -842,12 +863,14 @@ class CrossMmCustom(ScriptStrategyBase):
 
             self.buy_order_amended_previously: OrderAmendedPreviouslyDict = {
                 "order_id": None,
+                "amend_id": None,
                 "price": None,
                 "amount": None,
                 "amendment_try_timestamp": None,
             }
             self.sell_order_amended_previously: OrderAmendedPreviouslyDict = {
                 "order_id": None,
+                "amend_id": None,
                 "price": None,
                 "amount": None,
                 "amendment_try_timestamp": None,
@@ -857,6 +880,9 @@ class CrossMmCustom(ScriptStrategyBase):
 
             self.in_flight_buy_order = None
             self.in_flight_sell_order = None
+
+            self.in_flight_buy_order_limit = None
+            self.in_flight_sell_order_limit = None
 
             telegram_string = self.telegram_utils.start_balance_data_text(self.balances_data_dict)
             self.hummingbot.notify(telegram_string)
@@ -1173,7 +1199,7 @@ class CrossMmCustom(ScriptStrategyBase):
             # self.logger().info(f"######### Active BUY Limit Order: {self.active_buy_order.client_order_id}, order price: {self.active_buy_order.price} ########")
             self.in_flight_buy_order = self.active_in_flight_orders.get(self.active_buy_order.client_order_id)
                 
-            if self.amend_condition():
+            if self.amend_condition(self.in_flight_buy_order):
                 self.buy_order_exchange_id = self.in_flight_buy_order.exchange_order_id
 
                 # self.logger().info(f"######### Active BUY Limit Order: {self.active_buy_order.client_order_id}, order price: {self.active_buy_order.price} ########")
@@ -1183,6 +1209,8 @@ class CrossMmCustom(ScriptStrategyBase):
                 # the current in_flight_order values
                 # If the values are different we just cancel order and skip to the next tick
                 # to create a new order
+
+                # if self.buy_order_amended_previously["order_id"] == self.active_buy_order.client_order_id and self.buy_order_amended_previously["amend_id"] is None:
                 if self.buy_order_amended_previously["order_id"] == self.active_buy_order.client_order_id and (
                         (self.buy_order_amended_previously["price"] is not None 
                             and 
@@ -1229,20 +1257,87 @@ class CrossMmCustom(ScriptStrategyBase):
             if debug_output:
                 self.logger().info("There are no active buy orders.")
 
+################# START previous no-amend SELL block ###############
+        # if active_sell_orders:
+        #     self.active_sell_order = active_sell_orders[0]
+        #     self.in_flight_sell_order = self.active_in_flight_orders.get(self.active_sell_order.client_order_id)
+        #     if self.in_flight_sell_order is not None:
+        #         self.sell_order_exchange_id = self.in_flight_sell_order.exchange_order_id            
+        #     if debug_output:
+        #         self.logger().info("There are active sell orders.")
+        # else:
+        #     self.active_sell_order = None
+        #     if debug_output:
+        #         self.logger().info("There are no active sell orders.")
+################# END of previous no-amend SELL block ###############
+
         if active_sell_orders:
             self.active_sell_order = active_sell_orders[0]
+            # self.logger().info(f"######### Active SELL Limit Order: {self.active_sell_order.client_order_id}, order price: {self.active_sell_order.price} ########")
             self.in_flight_sell_order = self.active_in_flight_orders.get(self.active_sell_order.client_order_id)
+                
+            if self.amend_condition(self.in_flight_sell_order):
+                self.sell_order_exchange_id = self.in_flight_sell_order.exchange_order_id
+
+                # self.logger().info(f"######### Active SELL Limit Order: {self.active_sell_order.client_order_id}, order price: {self.active_sell_order.price} ########")
+
+                # We check if the order has been amended successfully by comparing 
+                # the price and amount previously sent to the exchange with 
+                # the current in_flight_order values
+                # If the values are different we just cancel order and skip to the next tick
+                # to create a new order
+
+                # if self.sell_order_amended_previously["order_id"] == self.active_sell_order.client_order_id and self.sell_order_amended_previously["amend_id"] is None:
+                if self.sell_order_amended_previously["order_id"] == self.active_sell_order.client_order_id and (
+                        (self.sell_order_amended_previously["price"] is not None 
+                            and 
+                        self.sell_order_amended_previously["price"] != self.in_flight_sell_order.price
+                        ) 
+                            or 
+                        (self.sell_order_amended_previously["amount"] is not None 
+                            and 
+                        self.sell_order_amended_previously["amount"] != self.in_flight_sell_order.amount
+                        )
+                    ):
+                    vars_message = (
+                        f'self.sell_order_amended_previously["order_id"] = {self.sell_order_amended_previously["order_id"]}\n'
+                        f'self.active_sell_order.client_order_id = {self.active_sell_order.client_order_id}\n'
+                        f'self.sell_order_amended_previously["price"] = {self.sell_order_amended_previously["price"]}\n'
+                        f'self.in_flight_sell_order.price = {self.in_flight_sell_order.price}\n'
+                        f'self.sell_order_amended_previously["amount"] = {self.sell_order_amended_previously["amount"]}\n'
+                        f'self.in_flight_sell_order.amount = {self.in_flight_sell_order.amount}\n'
+                        f'self.sell_order_amended_previously["amendment_try_timestamp"] = {self.sell_order_amended_previously["amendment_try_timestamp"]}'
+                    )    
+
+                    self.logger().notify(f"SELL order was not amended successfully, skipping to the next tick and canceling it. Report:\n{vars_message}")
+                    self.custom_cancel_order(self.active_sell_order)
+                    self.skip_order_flow(side="sell", activate=True)
+
+                # self.logger().info(f"######### In Flight SELL Order: {self.sell_order_exchange_id}, order price: {self.in_flight_sell_order.price} ########")
+
+            # a protection from not finding the corresponding in_flight_order.
+            # if it's not found everything just goes with create and cancel, without 'amend' feature
+            
             if self.in_flight_sell_order is not None:
-                self.sell_order_exchange_id = self.in_flight_sell_order.exchange_order_id            
+                self.in_flight_sell_order_limit = self.in_flight_sell_order.to_limit_order()
+                # self.logger().info(f"self.active_sell_order: {self.active_sell_order}\nself.in_flight_sell_order_limit: {self.in_flight_sell_order_limit}")
+
+                self.active_sell_order = self.in_flight_sell_order_limit
+
+                # self.logger().info(f"self.active_sell_order after copying from flight order: {self.active_sell_order}")   
+
             if debug_output:
                 self.logger().info("There are active sell orders.")
+                self.logger().info(f"{self.active_sell_order}")
         else:
             self.active_sell_order = None
             if debug_output:
                 self.logger().info("There are no active sell orders.")
+        
 
-    def amend_condition(self) -> bool:
-        result = self.in_flight_buy_order is not None and self.enable_amend_order_for_kraken_v2
+
+    def amend_condition(self, in_flight_order) -> bool:
+        result = in_flight_order is not None and self.enable_amend_order_for_kraken_v2
         return result
 
     def skip_order_flow(self, side="buy", activate=False):
@@ -1614,59 +1709,209 @@ class CrossMmCustom(ScriptStrategyBase):
         
         # self.create_new_maker_order(side=new_order_side)
     
-    def amend_buy_order(self, debug_output=False) -> Optional[str]:
-        # the below two vars are float
-        new_order_size = self.order_size_buy
-        new_order_price = self.planned_order_price_buy
+    # def amend_buy_order(self, debug_output=False) -> Optional[str]:
+    #     # the below two vars are float
+    #     new_order_size = self.order_size_buy
+    #     new_order_price = self.planned_order_price_buy
    
-        new_order_side = "BUY"
-        order_id = self.buy_order_exchange_id
-        try: 
-            new_order_size_decimal = Decimal(str(new_order_size))        
-        except (ValueError, InvalidOperation) as e:
-            self.logger().info(f"Amend Order: the planned {new_order_side} order size is not valid ({new_order_size}) - {e}")
-            return "cancel"
-        # we only check the order amount if it will be different than before
-        if self.active_buy_order.quantity != new_order_size_decimal:
+    #     new_order_side = "BUY"
+    #     order_id = self.buy_order_exchange_id
+    #     try: 
+    #         new_order_size_decimal = Decimal(str(new_order_size))
+    #         new_order_size_decimal = self.connectors[self.maker].quantize_order_amount(self.maker_pair, new_order_size_decimal)        
+    #     except (ValueError, InvalidOperation) as e:
+    #         self.logger().info(f"Amend Order: the planned {new_order_side} order size is not valid ({new_order_size}) - {e}")
+    #         return "cancel"
+    #     # we only check the order amount if it will be different than before
+    #     if self.active_buy_order.quantity != new_order_size_decimal:
         
-            if not self.check_min_order_amount_for_maker_order_creation(new_order_size):
+    #         if not self.check_min_order_amount_for_maker_order_creation(new_order_size):
+    #             if debug_output:
+    #                 self.logger().info(f"Edit BUY Order: the planned {new_order_side} order amount is too low: {new_order_size}, can't place a new order")
+    #             return "cancel"
+    #     else:
+    #         new_order_size_decimal = None
+
+    #     try: 
+    #         new_order_price_decimal = Decimal(
+    #             self.round_to_precision(new_order_price, self.order_price_precision, rounding_mode='floor'))
+    #         new_order_price_decimal = self.connectors[self.maker].quantize_order_price(self.maker_pair, new_order_price_decimal)        
+    #     except Exception as e:
+    #         self.logger().info(f"Amend Order: the planned {new_order_price} order price is not valid ({new_order_size}) - {e}")
+    #         return "cancel"
+
+    #     # self.logger().info(f"self.active_buy_order.price == new_order_price_decimal -> ({self.active_buy_order.price == new_order_price_decimal}\n{self.active_buy_order.price} == {new_order_price_decimal})")
+        
+    #     # it means there's nothing to update
+    #     if self.active_buy_order.price == new_order_price_decimal and new_order_size_decimal is None:
+    #         return
+
+    #     try:
+    #         amend_result = self.connectors[self.maker].amend_order(order_id, new_order_size_decimal, new_order_price_decimal, self.maker_pair)
+    #     except Exception as e:
+    #         error_message = f"Tried to amend order {order_id} buy failed. An error of type {type(e).__name__} occurred while AMENDING order: {e}"
+    #         self.logger().error(error_message, exc_info=True)
+    #         self.telegram_utils.send_unformatted_message(error_message)
+    #         return "cancel"
+
+    #     # ether amount or price can be None, or both
+    #     # these values will be used later to check if the order
+    #     # has been amended successfully by comparing these values
+    #     # to the values of the already presumably amended in_flight_order
+    #     # self.logger().info(f"amend_result: {amend_result}")  
+    #     self.buy_order_amended_previously = {
+    #         "order_id": self.active_buy_order.client_order_id,
+    #         "amend_id": None,
+    #         "amount": new_order_size_decimal,
+    #         "price": new_order_price_decimal,
+    #         "amendment_try_timestamp": time.time()
+    #     }
+
+
+    #     self.logger().info(f"Amending {new_order_side} order {self.active_buy_order.client_order_id} ({order_id}). Amount: from {self.active_buy_order.quantity} to {new_order_size_decimal} and price: from {self.active_buy_order.price} to {new_order_price_decimal}")
+
+    # def amend_sell_order(self, debug_output=False) -> Optional[str]:
+    #     # the below two vars are float
+    #     new_order_size = self.order_size_sell
+    #     new_order_price = self.planned_order_price_sell
+   
+    #     new_order_side = "SELL"
+    #     order_id = self.sell_order_exchange_id
+    #     try: 
+    #         new_order_size_decimal = Decimal(str(new_order_size))
+    #         new_order_size_decimal = self.connectors[self.maker].quantize_order_amount(self.maker_pair, new_order_size_decimal)        
+    #     except (ValueError, InvalidOperation) as e:
+    #         self.logger().info(f"Amend Order: the planned {new_order_side} order size is not valid ({new_order_size}) - {e}")
+    #         return "cancel"
+    #     # we only check the order amount if it will be different than before
+    #     if self.active_sell_order.quantity != new_order_size_decimal:
+        
+    #         if not self.check_min_order_amount_for_maker_order_creation(new_order_size):
+    #             if debug_output:
+    #                 self.logger().info(f"Edit SELL Order: the planned {new_order_side} order amount is too low: {new_order_size}, can't place a new order")
+    #             return "cancel"
+    #     else:
+    #         new_order_size_decimal = None
+
+    #     try: 
+    #         new_order_price_decimal = Decimal(
+    #             self.round_to_precision(new_order_price, self.order_price_precision, rounding_mode='ceil'))
+    #         new_order_price_decimal = self.connectors[self.maker].quantize_order_price(self.maker_pair, new_order_price_decimal)        
+    #     except Exception as e:
+    #         self.logger().info(f"Amend Order: the planned {new_order_price} order price is not valid ({new_order_size}) - {e}")
+    #         return "cancel"
+
+    #     # self.logger().info(f"self.active_sell_order.price == new_order_price_decimal -> ({self.active_sell_order.price == new_order_price_decimal}\n{self.active_sell_order.price} == {new_order_price_decimal})")
+        
+    #     # it means there's nothing to update
+    #     if self.active_sell_order.price == new_order_price_decimal and new_order_size_decimal is None:
+    #         return
+
+    #     try:
+    #         amend_result = self.connectors[self.maker].amend_order(order_id, new_order_size_decimal, new_order_price_decimal, self.maker_pair)
+    #     except Exception as e:
+    #         error_message = f"Tried to amend order {order_id} sell failed. An error of type {type(e).__name__} occurred while AMENDING order: {e}"
+    #         self.logger().error(error_message, exc_info=True)
+    #         self.telegram_utils.send_unformatted_message(error_message)
+    #         return "cancel"
+
+    #     # ether amount or price can be None, or both
+    #     # these values will be used later to check if the order
+    #     # has been amended successfully by comparing these values
+    #     # to the values of the already presumably amended in_flight_order
+    #     # self.logger().info(f"amend_result: {amend_result}")  
+    #     self.sell_order_amended_previously = {
+    #         "order_id": self.active_sell_order.client_order_id,
+    #         "amend_id": None,
+    #         "amount": new_order_size_decimal,
+    #         "price": new_order_price_decimal,
+    #         "amendment_try_timestamp": time.time()
+    #     }
+
+
+    #     self.logger().info(f"Amending {new_order_side} order {self.active_sell_order.client_order_id} ({order_id}). Amount: from {self.active_sell_order.quantity} to {new_order_size_decimal} and price: from {self.active_sell_order.price} to {new_order_price_decimal}")
+
+    def amend_order_any_side(self, 
+                            order_side: str, 
+                            order_size: float, 
+                            planned_order_price: float, 
+                            order_exchange_id: str, 
+                            active_order, 
+                            amended_previously: dict, 
+                            debug_output=False) -> Optional[str]:
+        """
+        A universal function to amend an order for both BUY and SELL sides.
+
+        Args:
+            order_side (str): "BUY" or "SELL" to specify the order side.
+            order_size (float): The new order size.
+            planned_order_price (float): The new planned price for the order.
+            order_exchange_id (str): The exchange ID of the order to amend.
+            active_order: The active order object (e.g., self.active_buy_order).
+            amended_previously (dict): Dictionary storing amendment history.
+            debug_output (bool): Whether to print debugging information.
+
+        Returns:
+            Optional[str]: Returns "cancel" if the order amendment fails or is invalid.
+        """
+        try: 
+            # Convert the order size to a Decimal and quantize
+            new_order_size_decimal = Decimal(str(order_size))
+            new_order_size_decimal = self.connectors[self.maker].quantize_order_amount(self.maker_pair, new_order_size_decimal)        
+        except (ValueError, InvalidOperation) as e:
+            self.logger().info(f"Amend Order: the planned {order_side} order size is not valid ({order_size}) - {e}")
+            return "cancel"
+
+        # Check if the new size is different from the active order
+        if active_order.quantity != new_order_size_decimal:
+            if not self.check_min_order_amount_for_maker_order_creation(order_size):
                 if debug_output:
-                    self.logger().info(f"Edit Order: the planned {new_order_side} order amount is too low: {new_order_size}, can't place a new order")
+                    self.logger().info(f"Edit Order: the planned {order_side} order amount is too low: {order_size}, can't place a new order")
                 return "cancel"
         else:
             new_order_size_decimal = None
 
         try: 
+            # Adjust rounding mode based on order side
+            rounding_mode = 'floor' if order_side == "BUY" else 'ceil'
+
+            # Convert the order price to a Decimal and quantize
             new_order_price_decimal = Decimal(
-                self.round_to_precision(new_order_price, self.order_price_precision, rounding_mode='floor'))        
+                self.round_to_precision(planned_order_price, self.order_price_precision, rounding_mode=rounding_mode))
+            new_order_price_decimal = self.connectors[self.maker].quantize_order_price(self.maker_pair, new_order_price_decimal)        
         except Exception as e:
-            self.logger().info(f"Amend Order: the planned {new_order_price} order price is not valid ({new_order_size}) - {e}")
+            self.logger().info(f"Amend Order: the planned {planned_order_price} order price is not valid ({order_size}) - {e}")
             return "cancel"
 
-        # self.logger().info(f"self.active_buy_order.price == new_order_price_decimal -> ({self.active_buy_order.price == new_order_price_decimal}\n{self.active_buy_order.price} == {new_order_price_decimal})")
-        
-        # it means there's nothing to update
-        if self.active_buy_order.price == new_order_price_decimal and new_order_size_decimal is None:
+        # If both price and size are unchanged, nothing to update
+        if active_order.price == new_order_price_decimal and new_order_size_decimal is None:
             return
 
         try:
-            amend_result = self.connectors[self.maker].amend_order(order_id, new_order_size_decimal, new_order_price_decimal)
+            # Send the amend order request to the exchange
+            amend_result = self.connectors[self.maker].amend_order(order_exchange_id, new_order_size_decimal, new_order_price_decimal, self.maker_pair)
         except Exception as e:
-            error_message = f"Tried to amend order {order_id} buy failed. An error of type {type(e).__name__} occurred while AMENDING order: {e}"
+            error_message = f"Tried to amend order {order_exchange_id} {order_side.lower()} failed. An error of type {type(e).__name__} occurred while AMENDING order: {e}"
             self.logger().error(error_message, exc_info=True)
             self.telegram_utils.send_unformatted_message(error_message)
             return "cancel"
 
-        self.buy_order_amended_previously = {
-            "order_id": self.active_buy_order.client_order_id,
+        # Store amendment details for future comparison
+        amended_previously.update({
+            "order_id": active_order.client_order_id,
+            "amend_id": None,
             "amount": new_order_size_decimal,
             "price": new_order_price_decimal,
             "amendment_try_timestamp": time.time()
-        }
+        })
 
-        if debug_output:
-            self.logger().info(f"Amending {new_order_side} order {self.active_buy_order.client_order_id} ({order_id}). Amount: from {self.active_buy_order.quantity} to {new_order_size_decimal} and price: from {self.active_buy_order.price} to {new_order_price_decimal}")
 
+        self.logger().info(
+            f"Amending {order_side} order {active_order.client_order_id} ({order_exchange_id}). "
+            f"Amount: from {active_order.quantity} to {new_order_size_decimal} and "
+            f"price: from {active_order.price} to {new_order_price_decimal}"
+        )
+        
 
     def cancel_all_active_limit_orders(self, debug_output=False):
         for order in self.active_limit_orders:
@@ -1692,16 +1937,18 @@ class CrossMmCustom(ScriptStrategyBase):
         # pass
 
     def did_cancel_order(self, event: OrderCancelledEvent):
-        if self.amend_condition():
-            return
         # self.logger().info(f"Catched Order cancel!!!")
         if (self.create_buy_order_after_cancel_in_current_tick_cycle == True 
             and self.buy_order_client_id_to_edit_in_current_tick_cycle == event.order_id):
+            if self.amend_condition(self.in_flight_buy_order):
+                return
             # self.logger().info(f"Catched Order cancel and creating a new order! Cancelled order id: {self.buy_order_client_id_to_edit_in_current_tick_cycle}")
             self.create_new_maker_order(side=TradeType.BUY)
 
         if (self.create_sell_order_after_cancel_in_current_tick_cycle == True 
             and self.sell_order_client_id_to_edit_in_current_tick_cycle == event.order_id):
+            if self.amend_condition(self.in_flight_sell_order):
+                return            
             self.create_new_maker_order(side=TradeType.SELL)
 
     def did_fail_order(self, event: MarketOrderFailureEvent):
@@ -2036,7 +2283,16 @@ class CrossMmCustom(ScriptStrategyBase):
             # the filled order may not have been filled completely
             # Also making a small delay to wait for the balances update
             # so the new orders could be added correctly
-            self.custom_cancel_all_orders()
+            self.logger().info("Cancelling all orders after maker filled")
+            self.custom_cancel_all_orders(debug_output=True)
+
+            # If the active order is still not marked as completed but
+            # the filled amount is equal to the active order amount we 
+            # don't cancel such an order because it was fully completed
+            
+            # self.check_and_cancel_order(self.active_buy_order, event.trade_type, TradeType.BUY, event.amount)
+            # self.check_and_cancel_order(self.active_sell_order, event.trade_type, TradeType.SELL, event.amount)
+            
             durtaion = self.after_order_is_filled_delay
             # self.logger().info(f"Starting timer 'after_order_is_filled_timer' for {durtaion} ms")
 
@@ -2100,6 +2356,14 @@ class CrossMmCustom(ScriptStrategyBase):
             
         #     # self.logger().info(order_message['log_message'])
         #     self.telegram_utils.send_unformatted_message(order_message['telegram_message'])             
+
+    def check_and_cancel_order(self, active_order, trade_type: TradeType, expected_trade_type: TradeType, amount: Decimal):
+        if active_order is not None and trade_type == expected_trade_type:
+            self.logger().info(f"Order mismatch: {active_order.quantity} != {amount} (condition: {active_order.quantity != amount})"
+)
+            if active_order.quantity != amount:
+                self.logger().info(f"Canceling order {active_order.client_order_id}")
+                self.custom_cancel_order(order=active_order, debug_output=False)
 
     def did_complete_buy_order(self, event: BuyOrderCompletedEvent):
         self.notify_about_completed_order(event)
@@ -2345,8 +2609,10 @@ class CrossMmCustom(ScriptStrategyBase):
         columns = ["Exchange", "Market", "Side", "Price", "Amount", "Spread Mid", "Spread Cancel", "Age"]
         data = []
 
+        active_orders = [order for order in [self.in_flight_sell_order_limit, self.in_flight_buy_order_limit] if order is not None]
 
-        for order in self.active_limit_orders:
+
+        for order in active_orders:
             spread_mid_bps = 0
             spread_cancel_bps = 0
             age_txt = 0
