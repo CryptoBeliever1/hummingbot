@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from bidict import bidict
 
 from hummingbot.client.hummingbot_application import HummingbotApplication
-from hummingbot.connector.constants import s_decimal_NaN
+from hummingbot.connector.constants import s_decimal_0, s_decimal_NaN
 from hummingbot.connector.exchange.kraken_v2 import kraken_v2_constants as CONSTANTS, kraken_v2_web_utils as web_utils
 from hummingbot.connector.exchange.kraken_v2.kraken_v2_api_order_book_data_source import KrakenV2APIOrderBookDataSource
 from hummingbot.connector.exchange.kraken_v2.kraken_v2_api_user_stream_data_source import (
@@ -332,22 +332,6 @@ class KrakenV2Exchange(ExchangePyBase):
             price=price))
         return order_id
 
-    def amend_order(self,
-             order_id: str,       
-             amount: Decimal,
-             price: Decimal,
-             trading_pair: str,
-             **kwargs) -> str:
-        """
-        Creates a promise to amend a limit order.
-        """
-        safe_ensure_future(self._amend_order(
-            order_id=order_id,
-            amount=amount,
-            price=price,
-            trading_pair=trading_pair))
-        return order_id
-
     async def get_asset_pairs(self) -> Dict[str, Any]:
         if not self._asset_pairs:
             asset_pairs = await self._api_request_with_retry(method=RESTMethod.GET,
@@ -387,7 +371,7 @@ class KrakenV2Exchange(ExchangePyBase):
         o_id = order_result["txid"][0]    
         return (o_id, self.current_timestamp)
 
-    async def _amend_order(self,
+    async def _amend_order_old(self,
                            order_id: str,
                            amount: Decimal,
                            price: Decimal,
@@ -407,11 +391,12 @@ class KrakenV2Exchange(ExchangePyBase):
         
             data["limit_price"] = str(price)
 
-        # self.logger().info(f"Sending POST request: {data}")
+        self.logger().info(f"Sending POST request: {data}")
         order_result = await self._api_request_with_retry(RESTMethod.POST,
                                                           CONSTANTS.AMEND_ORDER_PATH_URL,
                                                           data=data,
                                                           is_auth_required=True)
+        self.logger().info(f"Received reply: {order_result}")
 
         a_id = order_result.get("amend_id")
         ret_dic = {
@@ -421,6 +406,194 @@ class KrakenV2Exchange(ExchangePyBase):
             # "amendment_try_timestamp": self.current_timestamp
         }  
         return ret_dic
+
+    def amend_order(self,
+             client_order_id: str,       
+             amount: Decimal,
+             price: Decimal,
+             **kwargs) -> str:
+        """
+        Creates a promise to amend a limit order.
+        """
+
+        safe_ensure_future(self._amend_order(
+            client_order_id=client_order_id,
+            amount=amount,
+            price=price,
+            ))
+        return client_order_id
+
+    async def _amend_order(self,
+                    client_order_id: str,
+                    amount: Decimal,
+                    price: Decimal,
+                    **kwargs):
+        """
+        Amends an order in the exchange
+        """
+        if amount is None and price is None:
+            self.logger().info(f"Invalid or None price ({price}) and amount ({amount}) while trying to amend order {client_order_id}")
+            return
+
+        # tracked_order = self._order_tracker.active_orders.get(client_order_id)
+        tracked_order = self._order_tracker.fetch_tracked_order(client_order_id)
+
+        if tracked_order is None:
+            self.logger().info(f"Amend not successful: order {client_order_id} not found in active orders")
+            return
+        
+        trading_pair = tracked_order.trading_pair
+        trading_rule = self._trading_rules[trading_pair]
+
+        quantized_price = None
+        quantized_amount = None
+
+        if price is not None:
+            quantized_price = self.quantize_order_price(trading_pair, price)
+        elif price.is_nan() or price == s_decimal_0:
+            quantized_price = None
+                      
+        if amount is not None:
+            quantized_amount = self.quantize_order_amount(trading_pair=trading_pair, amount=amount)
+
+        amount_for_checking = quantized_amount if quantized_amount is not None else tracked_order.amount
+        
+        price_for_checking = quantized_price if quantized_price is not None else tracked_order.price
+
+        notional_size = price_for_checking * amount_for_checking
+
+        if amount_for_checking < trading_rule.min_order_size:
+            self.logger().warning(f"{tracked_order.trade_type.name.title()} order ({client_order_id}) amount {amount_for_checking} is lower than the minimum order "
+                                  f"size {trading_rule.min_order_size}. The order will not be amended, increase the "
+                                  f"amount to be higher than the minimum order size.")
+            await self._execute_order_cancel(tracked_order)
+            return
+
+        elif notional_size < trading_rule.min_notional_size:
+            self.logger().warning(f"{tracked_order.trade_type.name.title()} order notional {notional_size} is lower than the "
+                                  f"minimum notional size {trading_rule.min_notional_size}. The order will not be "
+                                  f"created. Increase the amount or the price to be higher than the minimum notional.")
+            await self._execute_order_cancel(tracked_order)
+            return
+        
+        elif price_for_checking == tracked_order.price and amount_for_checking == tracked_order.amount:
+            self.logger().warning(f"Order amend is not possible: both price ({price_for_checking}) and amount ({amount_for_checking}) are equal to the current order corresponding values. Doing nothing...")
+            return 
+
+        try:
+            await self._execute_amend_order_and_process_update(order=tracked_order, price=quantized_price, amount=quantized_amount, **kwargs,)
+
+            self.logger().info(f"Order {client_order_id} amended successfully.")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            await self._execute_order_cancel(tracked_order)
+            self._on_order_failure(
+                order_id=client_order_id,
+                trading_pair=trading_pair,
+                amount=amount,
+                trade_type=tracked_order.trade_type,
+                order_type=tracked_order.order_type,
+                price=price,
+                exception=ex,
+                **kwargs,
+            )        
+
+    async def _execute_amend_order_and_process_update(
+            self, 
+            order: InFlightOrder,
+            price: Decimal,
+            amount: Decimal, 
+            **kwargs) -> str:
+        
+        amend_id, update_timestamp = await self._execute_amend_order(
+            order_id=order.exchange_order_id,
+            amount=amount,
+            price=price,
+            **kwargs,
+        )
+
+        order_update: OrderUpdate = OrderUpdate(
+            client_order_id=order.client_order_id,
+            exchange_order_id=order.exchange_order_id,
+            trading_pair=order.trading_pair,
+            update_timestamp=update_timestamp,
+            new_state=OrderState.OPEN,
+            misc_updates={
+                "price": price,
+                "amount": amount,
+            }
+        )
+
+        if amend_id is not None:
+            await self.process_in_flight_order_update(order_update)
+
+        return amend_id
+
+    def sync_mode_process_in_flight_order_update(self, order_update):
+        return safe_ensure_future(self.process_in_flight_order_update(order_update))
+
+    async def process_in_flight_order_update(self, order_update: OrderUpdate) -> bool:
+        # There was no possibility to modify the in_flight_order.py file,
+        # so this method was created
+
+        order = self._order_tracker.fetch_order(order_update.client_order_id, order_update.exchange_order_id)
+
+        if order:
+            new_amount = order_update.misc_updates.get("amount")
+            new_price = order_update.misc_updates.get("price")
+
+            updated = False
+
+            if new_amount is not None and new_amount != order.amount:
+                order.amount = new_amount
+                updated = True
+
+            if new_price is not None and new_price != order.price:
+                order.price = new_price
+                updated = True
+
+            if order.current_state != order_update.new_state:           
+                order.current_state = order_update.new_state
+                updated = True
+        else:
+            lost_order = self._order_tracker.fetch_lost_order(
+                client_order_id=order_update.client_order_id, exchange_order_id=order_update.exchange_order_id
+            )
+            if lost_order:
+                if order_update.new_state in [OrderState.CANCELED, OrderState.FILLED, OrderState.FAILED]:
+                    # If the order officially reaches a final state after being lost it should be removed from the lost list
+                    del self._lost_orders[lost_order.client_order_id]
+            else:
+                self.logger().debug(f"Order is not/no longer being tracked ({order_update})")
+ 
+
+    async def _execute_amend_order(self,
+            order_id: str,
+            amount: Decimal,
+            price: Decimal,
+            **kwargs,
+        ):
+        
+        data = {
+            "txid": order_id,
+        }        
+
+        if amount is not None:
+            data["order_qty"] = str(amount)
+        if price is not None:
+            data["limit_price"] = str(price)
+
+        self.logger().info(f"Sending POST request: {data}")
+        order_result = await self._api_request_with_retry(RESTMethod.POST,
+                                                          CONSTANTS.AMEND_ORDER_PATH_URL,
+                                                          data=data,
+                                                          is_auth_required=True)
+        self.logger().info(f"Received reply: {order_result}")
+
+        a_id = order_result.get("amend_id")
+        return (a_id, self.current_timestamp)        
 
     async def _api_request_with_retry(self,
                                       method: RESTMethod,
@@ -594,6 +767,7 @@ class KrakenV2Exchange(ExchangePyBase):
                             if "exec_type" in item:
                                 if item["exec_type"] in ["trade"]:
                                     trade_message.append(item)
+                                    order_message.append(item)
                                 elif item["exec_type"] in ["pending_new"]:
                                     continue
                                 else:    
@@ -849,7 +1023,8 @@ class KrakenV2Exchange(ExchangePyBase):
             
             if order_msg["exec_type"] == "amended":
                 if order_msg["amended"]:
-                    message = f"Amended order {client_order_id}. Price: from {tracked_order.price} to {str(order_msg['limit_price'])}, Amount: from {tracked_order.amount} to {str(order_msg['order_qty'])}. Ratecount: {order_msg.get('ratecount')}"
+                    order_side = 'BUY' if tracked_order.trade_type == TradeType.BUY else 'SELL'
+                    message = f"Amended {order_side} order {client_order_id}. Price: from {tracked_order.price} to {str(order_msg['limit_price'])}, Amount: from {tracked_order.amount} to {str(order_msg['order_qty'])}. Ratecount: {order_msg.get('ratecount')}"
                     tracked_order.amount = Decimal(str(order_msg["order_qty"]))
                     tracked_order.price = Decimal(str(order_msg["limit_price"]))
                     self.logger().info(f"{message}")

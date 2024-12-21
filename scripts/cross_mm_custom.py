@@ -18,7 +18,7 @@ from hummingbot.client.hummingbot_application import HummingbotApplication
 from hummingbot.client.ui import version
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
-from hummingbot.core.data_type.in_flight_order import OrderState
+from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
 from hummingbot.core.data_type.order_candidate import OrderCandidate
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -1233,7 +1233,7 @@ class CrossMmCustom(ScriptStrategyBase):
                     )    
 
                     self.logger().notify(f"BUY order was not amended successfully, skipping to the next tick and canceling it. Report:\n{vars_message}")
-                    self.custom_cancel_order(self.active_buy_order)
+                    # self.custom_cancel_order(self.active_buy_order)
                     self.skip_order_flow(side="buy", activate=True)
 
                 # self.logger().info(f"######### In Flight BUY Order: {self.buy_order_exchange_id}, order price: {self.in_flight_buy_order.price} ########")
@@ -1310,7 +1310,7 @@ class CrossMmCustom(ScriptStrategyBase):
                     )    
 
                     self.logger().notify(f"SELL order was not amended successfully, skipping to the next tick and canceling it. Report:\n{vars_message}")
-                    self.custom_cancel_order(self.active_sell_order)
+                    # self.custom_cancel_order(self.active_sell_order)
                     self.skip_order_flow(side="sell", activate=True)
 
                 # self.logger().info(f"######### In Flight SELL Order: {self.sell_order_exchange_id}, order price: {self.in_flight_sell_order.price} ########")
@@ -1887,9 +1887,15 @@ class CrossMmCustom(ScriptStrategyBase):
         if active_order.price == new_order_price_decimal and new_order_size_decimal is None:
             return
 
+    # def amend_order(self,
+    #          client_order_id: str,       
+    #          amount: Decimal,
+    #          price: Decimal,
+    #          **kwargs) -> str:
+
         try:
             # Send the amend order request to the exchange
-            amend_result = self.connectors[self.maker].amend_order(order_exchange_id, new_order_size_decimal, new_order_price_decimal, self.maker_pair)
+            amend_result = self.connectors[self.maker].amend_order(active_order.client_order_id, new_order_size_decimal, new_order_price_decimal)
         except Exception as e:
             error_message = f"Tried to amend order {order_exchange_id} {order_side.lower()} failed. An error of type {type(e).__name__} occurred while AMENDING order: {e}"
             self.logger().error(error_message, exc_info=True)
@@ -2284,7 +2290,18 @@ class CrossMmCustom(ScriptStrategyBase):
             # Also making a small delay to wait for the balances update
             # so the new orders could be added correctly
             self.logger().info("Cancelling all orders after maker filled")
-            self.custom_cancel_all_orders(debug_output=True)
+            
+            if self.amend_condition(self.in_flight_buy_order):
+                self.check_in_flight_and_cancel(self.in_flight_buy_order)
+            elif self.active_buy_order is not None:
+                self.custom_cancel_order(order=self.active_buy_order)
+            
+            if self.amend_condition(self.in_flight_sell_order):        
+                self.check_in_flight_and_cancel(self.in_flight_sell_order)
+            elif self.active_sell_order is not None:    
+                self.custom_cancel_order(order=self.active_sell_order)
+
+            # self.custom_cancel_all_orders(debug_output=True)
 
             # If the active order is still not marked as completed but
             # the filled amount is equal to the active order amount we 
@@ -2357,13 +2374,18 @@ class CrossMmCustom(ScriptStrategyBase):
         #     # self.logger().info(order_message['log_message'])
         #     self.telegram_utils.send_unformatted_message(order_message['telegram_message'])             
 
-    def check_and_cancel_order(self, active_order, trade_type: TradeType, expected_trade_type: TradeType, amount: Decimal):
-        if active_order is not None and trade_type == expected_trade_type:
-            self.logger().info(f"Order mismatch: {active_order.quantity} != {amount} (condition: {active_order.quantity != amount})"
-)
-            if active_order.quantity != amount:
-                self.logger().info(f"Canceling order {active_order.client_order_id}")
-                self.custom_cancel_order(order=active_order, debug_output=False)
+#     def check_and_cancel_order(self, active_order, trade_type: TradeType, expected_trade_type: TradeType, amount: Decimal):
+#         if active_order is not None and trade_type == expected_trade_type:
+#             self.logger().info(f"Order mismatch: {active_order.quantity} != {amount} (condition: {active_order.quantity != amount})"
+# )
+#             if active_order.quantity != amount:
+#                 self.logger().info(f"Canceling order {active_order.client_order_id}")
+#                 self.custom_cancel_order(order=active_order, debug_output=False)
+
+    def check_in_flight_and_cancel(self, in_flight_order: InFlightOrder):
+        if in_flight_order is not None:
+            if not in_flight_order.is_done:
+                self.cancel(self.maker, in_flight_order.trading_pair, in_flight_order.client_order_id)
 
     def did_complete_buy_order(self, event: BuyOrderCompletedEvent):
         self.notify_about_completed_order(event)
