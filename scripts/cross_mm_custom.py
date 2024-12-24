@@ -19,6 +19,7 @@ from hummingbot.client.ui import version
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
+from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.data_type.order_candidate import OrderCandidate
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -1209,32 +1210,31 @@ class CrossMmCustom(ScriptStrategyBase):
                 # the current in_flight_order values
                 # If the values are different we just cancel order and skip to the next tick
                 # to create a new order
+                
+                # if self.buy_order_amended_previously["order_id"] == self.active_buy_order.client_order_id and (
+                #         (self.buy_order_amended_previously["price"] is not None 
+                #             and 
+                #         self.buy_order_amended_previously["price"] != self.in_flight_buy_order.price
+                #         ) 
+                #             or 
+                #         (self.buy_order_amended_previously["amount"] is not None 
+                #             and 
+                #         self.buy_order_amended_previously["amount"] != self.in_flight_buy_order.amount
+                #         )
+                #     ):
+                #     vars_message = (
+                #         f'self.buy_order_amended_previously["order_id"] = {self.buy_order_amended_previously["order_id"]}\n'
+                #         f'self.active_buy_order.client_order_id = {self.active_buy_order.client_order_id}\n'
+                #         f'self.buy_order_amended_previously["price"] = {self.buy_order_amended_previously["price"]}\n'
+                #         f'self.in_flight_buy_order.price = {self.in_flight_buy_order.price}\n'
+                #         f'self.buy_order_amended_previously["amount"] = {self.buy_order_amended_previously["amount"]}\n'
+                #         f'self.in_flight_buy_order.amount = {self.in_flight_buy_order.amount}\n'
+                #         f'self.buy_order_amended_previously["amendment_try_timestamp"] = {self.buy_order_amended_previously["amendment_try_timestamp"]}'
+                #     )    
 
-                # if self.buy_order_amended_previously["order_id"] == self.active_buy_order.client_order_id and self.buy_order_amended_previously["amend_id"] is None:
-                if self.buy_order_amended_previously["order_id"] == self.active_buy_order.client_order_id and (
-                        (self.buy_order_amended_previously["price"] is not None 
-                            and 
-                        self.buy_order_amended_previously["price"] != self.in_flight_buy_order.price
-                        ) 
-                            or 
-                        (self.buy_order_amended_previously["amount"] is not None 
-                            and 
-                        self.buy_order_amended_previously["amount"] != self.in_flight_buy_order.amount
-                        )
-                    ):
-                    vars_message = (
-                        f'self.buy_order_amended_previously["order_id"] = {self.buy_order_amended_previously["order_id"]}\n'
-                        f'self.active_buy_order.client_order_id = {self.active_buy_order.client_order_id}\n'
-                        f'self.buy_order_amended_previously["price"] = {self.buy_order_amended_previously["price"]}\n'
-                        f'self.in_flight_buy_order.price = {self.in_flight_buy_order.price}\n'
-                        f'self.buy_order_amended_previously["amount"] = {self.buy_order_amended_previously["amount"]}\n'
-                        f'self.in_flight_buy_order.amount = {self.in_flight_buy_order.amount}\n'
-                        f'self.buy_order_amended_previously["amendment_try_timestamp"] = {self.buy_order_amended_previously["amendment_try_timestamp"]}'
-                    )    
-
-                    self.logger().notify(f"BUY order was not amended successfully, skipping to the next tick and canceling it. Report:\n{vars_message}")
-                    # self.custom_cancel_order(self.active_buy_order)
-                    self.skip_order_flow(side="buy", activate=True)
+                #     self.logger().notify(f"BUY order was not amended successfully, skipping to the next tick and canceling it. Report:\n{vars_message}")
+                #     self.custom_cancel_order(self.active_buy_order)
+                #     self.skip_order_flow(side="buy", activate=True)
 
                 # self.logger().info(f"######### In Flight BUY Order: {self.buy_order_exchange_id}, order price: {self.in_flight_buy_order.price} ########")
 
@@ -1287,31 +1287,30 @@ class CrossMmCustom(ScriptStrategyBase):
                 # If the values are different we just cancel order and skip to the next tick
                 # to create a new order
 
-                # if self.sell_order_amended_previously["order_id"] == self.active_sell_order.client_order_id and self.sell_order_amended_previously["amend_id"] is None:
-                if self.sell_order_amended_previously["order_id"] == self.active_sell_order.client_order_id and (
-                        (self.sell_order_amended_previously["price"] is not None 
-                            and 
-                        self.sell_order_amended_previously["price"] != self.in_flight_sell_order.price
-                        ) 
-                            or 
-                        (self.sell_order_amended_previously["amount"] is not None 
-                            and 
-                        self.sell_order_amended_previously["amount"] != self.in_flight_sell_order.amount
-                        )
-                    ):
-                    vars_message = (
-                        f'self.sell_order_amended_previously["order_id"] = {self.sell_order_amended_previously["order_id"]}\n'
-                        f'self.active_sell_order.client_order_id = {self.active_sell_order.client_order_id}\n'
-                        f'self.sell_order_amended_previously["price"] = {self.sell_order_amended_previously["price"]}\n'
-                        f'self.in_flight_sell_order.price = {self.in_flight_sell_order.price}\n'
-                        f'self.sell_order_amended_previously["amount"] = {self.sell_order_amended_previously["amount"]}\n'
-                        f'self.in_flight_sell_order.amount = {self.in_flight_sell_order.amount}\n'
-                        f'self.sell_order_amended_previously["amendment_try_timestamp"] = {self.sell_order_amended_previously["amendment_try_timestamp"]}'
-                    )    
+                # if self.sell_order_amended_previously["order_id"] == self.active_sell_order.client_order_id and (
+                #         (self.sell_order_amended_previously["price"] is not None 
+                #             and 
+                #         self.sell_order_amended_previously["price"] != self.in_flight_sell_order.price
+                #         ) 
+                #             or 
+                #         (self.sell_order_amended_previously["amount"] is not None 
+                #             and 
+                #         self.sell_order_amended_previously["amount"] != self.in_flight_sell_order.amount
+                #         )
+                #     ):
+                #     vars_message = (
+                #         f'self.sell_order_amended_previously["order_id"] = {self.sell_order_amended_previously["order_id"]}\n'
+                #         f'self.active_sell_order.client_order_id = {self.active_sell_order.client_order_id}\n'
+                #         f'self.sell_order_amended_previously["price"] = {self.sell_order_amended_previously["price"]}\n'
+                #         f'self.in_flight_sell_order.price = {self.in_flight_sell_order.price}\n'
+                #         f'self.sell_order_amended_previously["amount"] = {self.sell_order_amended_previously["amount"]}\n'
+                #         f'self.in_flight_sell_order.amount = {self.in_flight_sell_order.amount}\n'
+                #         f'self.sell_order_amended_previously["amendment_try_timestamp"] = {self.sell_order_amended_previously["amendment_try_timestamp"]}'
+                #     )    
 
-                    self.logger().notify(f"SELL order was not amended successfully, skipping to the next tick and canceling it. Report:\n{vars_message}")
-                    # self.custom_cancel_order(self.active_sell_order)
-                    self.skip_order_flow(side="sell", activate=True)
+                #     self.logger().notify(f"SELL order was not amended successfully, skipping to the next tick and canceling it. Report:\n{vars_message}")
+                #     self.custom_cancel_order(self.active_sell_order)
+                #     self.skip_order_flow(side="sell", activate=True)
 
                 # self.logger().info(f"######### In Flight SELL Order: {self.sell_order_exchange_id}, order price: {self.in_flight_sell_order.price} ########")
 
@@ -1836,7 +1835,7 @@ class CrossMmCustom(ScriptStrategyBase):
                             order_size: float, 
                             planned_order_price: float, 
                             order_exchange_id: str, 
-                            active_order, 
+                            active_order: LimitOrder, 
                             amended_previously: dict, 
                             debug_output=False) -> Optional[str]:
         """
@@ -1845,14 +1844,14 @@ class CrossMmCustom(ScriptStrategyBase):
         Args:
             order_side (str): "BUY" or "SELL" to specify the order side.
             order_size (float): The new order size.
-            planned_order_price (float): The new planned price for the order.
-            order_exchange_id (str): The exchange ID of the order to amend.
+            planned_order_price (float): The new order price.
+            order_exchange_id (str): The exchange order ID to amend.
             active_order: The active order object (e.g., self.active_buy_order).
-            amended_previously (dict): Dictionary storing amendment history.
+            amended_previously (dict): Dictionary storing amendment history from the previous amendment try.
             debug_output (bool): Whether to print debugging information.
 
         Returns:
-            Optional[str]: Returns "cancel" if the order amendment fails or is invalid.
+            Optional[str]: Returns "cancel" if the order amendment fails or is invalid. This will later signal to cancel the active order becase there were some problems with it. Sometimes returns None.
         """
         try: 
             # Convert the order size to a Decimal and quantize
@@ -1892,7 +1891,8 @@ class CrossMmCustom(ScriptStrategyBase):
     #          amount: Decimal,
     #          price: Decimal,
     #          **kwargs) -> str:
-
+        order_price_before_amendment = active_order.price
+        order_size_before_amendment = active_order.quantity
         try:
             # Send the amend order request to the exchange
             amend_result = self.connectors[self.maker].amend_order(active_order.client_order_id, new_order_size_decimal, new_order_price_decimal)
@@ -1911,12 +1911,11 @@ class CrossMmCustom(ScriptStrategyBase):
             "amendment_try_timestamp": time.time()
         })
 
-
-        self.logger().info(
-            f"Amending {order_side} order {active_order.client_order_id} ({order_exchange_id}). "
-            f"Amount: from {active_order.quantity} to {new_order_size_decimal} and "
-            f"price: from {active_order.price} to {new_order_price_decimal}"
-        )
+        # self.logger().info(
+        #     f"Amended {order_side} order {active_order.client_order_id} ({order_exchange_id}). "
+        #     f"Amount: from {order_size_before_amendment} to {new_order_size_decimal} and "
+        #     f"price: from {order_price_before_amendment} to {new_order_price_decimal}"
+        # )
         
 
     def cancel_all_active_limit_orders(self, debug_output=False):

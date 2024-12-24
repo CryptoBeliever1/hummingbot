@@ -409,11 +409,20 @@ class KrakenV2Exchange(ExchangePyBase):
 
     def amend_order(self,
              client_order_id: str,       
-             amount: Decimal,
-             price: Decimal,
+             amount: Decimal | None,
+             price: Decimal | None,
              **kwargs) -> str:
         """
-        Creates a promise to amend a limit order.
+        Creates a promise to amend a limit order. 
+
+        Args:
+            client_order_id (str): The inner identifier of the order to be amended.
+            amount (Decimal | None): The new amount for the order. If None, the amount remains unchanged.
+            price (Decimal | None): The new price for the order. If None, the price remains unchanged.
+            **kwargs: Additional optional parameters for the amendment request.
+
+        Returns:
+            str: A promise or confirmation string for the amended order.
         """
 
         safe_ensure_future(self._amend_order(
@@ -425,11 +434,20 @@ class KrakenV2Exchange(ExchangePyBase):
 
     async def _amend_order(self,
                     client_order_id: str,
-                    amount: Decimal,
-                    price: Decimal,
+                    amount: Decimal | None,
+                    price: Decimal | None,
                     **kwargs):
         """
         Amends an order in the exchange
+        
+        Args:
+            client_order_id (str): The inner identifier of the order to be amended.
+            amount (Decimal | None): The new amount for the order. If None, the amount remains unchanged.
+            price (Decimal | None): The new price for the order. If None, the price remains unchanged.
+            **kwargs: Additional optional parameters for the amendment request.
+
+        Returns:
+            None
         """
         if amount is None and price is None:
             self.logger().info(f"Invalid or None price ({price}) and amount ({amount}) while trying to amend order {client_order_id}")
@@ -480,25 +498,35 @@ class KrakenV2Exchange(ExchangePyBase):
             self.logger().warning(f"Order amend is not possible: both price ({price_for_checking}) and amount ({amount_for_checking}) are equal to the current order corresponding values. Doing nothing...")
             return 
 
+        # order_price_before_amendment = tracked_order.price
+        # order_size_before_amendment = tracked_order.amount        
+
         try:
             await self._execute_amend_order_and_process_update(order=tracked_order, price=quantized_price, amount=quantized_amount, **kwargs,)
 
-            self.logger().info(f"Order {client_order_id} amended successfully.")
+            # self.logger().info(f"Order {client_order_id} amended successfully. ")
+            
+            # sometimes ws message arrives faster and in_flight_order is already
+            # updated by the time the response is received from the above POST request
+            # So no message is sent if the order is updated already.
+
+            # amount_message = f"from {order_size_before_amendment} to {quantized_amount}"
+            # size_message = f"from {order_price_before_amendment} to {quantized_price}"
+            # self.logger().info(
+            #     f"Amended order {client_order_id}. "
+            #     f"Price: "
+            #     f"{'Not changed' if quantized_price is None else size_message}. "
+            #     f"Amount: "
+            #     f"{'Not changed' if quantized_amount is None else amount_message}"
+
+            # )
+
 
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             await self._execute_order_cancel(tracked_order)
-            self._on_order_failure(
-                order_id=client_order_id,
-                trading_pair=trading_pair,
-                amount=amount,
-                trade_type=tracked_order.trade_type,
-                order_type=tracked_order.order_type,
-                price=price,
-                exception=ex,
-                **kwargs,
-            )        
+            self.logger().error(f"Error while amending order {client_order_id}. Tried to cancel it.", exc_info=True)       
 
     async def _execute_amend_order_and_process_update(
             self, 
@@ -514,22 +542,28 @@ class KrakenV2Exchange(ExchangePyBase):
             **kwargs,
         )
 
+        if amend_id is not None:
+            order_update = self._create_order_update_with_price_and_amount(price, amount, order)
+            await self.process_in_flight_order_update(order_update)
+
+        return amend_id
+
+    def _create_order_update_with_price_and_amount(self, 
+                                                     price: Decimal | None,
+                                                     amount: Decimal | None,
+                                                     order: InFlightOrder) -> OrderUpdate:
         order_update: OrderUpdate = OrderUpdate(
             client_order_id=order.client_order_id,
             exchange_order_id=order.exchange_order_id,
             trading_pair=order.trading_pair,
-            update_timestamp=update_timestamp,
+            update_timestamp=self.current_timestamp,
             new_state=OrderState.OPEN,
             misc_updates={
                 "price": price,
                 "amount": amount,
             }
-        )
-
-        if amend_id is not None:
-            await self.process_in_flight_order_update(order_update)
-
-        return amend_id
+        )        
+        return order_update
 
     def sync_mode_process_in_flight_order_update(self, order_update):
         return safe_ensure_future(self.process_in_flight_order_update(order_update))
@@ -557,6 +591,10 @@ class KrakenV2Exchange(ExchangePyBase):
             if order.current_state != order_update.new_state:           
                 order.current_state = order_update.new_state
                 updated = True
+
+        if updated:
+            order.last_update_timestamp = order_update.update_timestamp
+
         else:
             lost_order = self._order_tracker.fetch_lost_order(
                 client_order_id=order_update.client_order_id, exchange_order_id=order_update.exchange_order_id
@@ -567,7 +605,7 @@ class KrakenV2Exchange(ExchangePyBase):
                     del self._lost_orders[lost_order.client_order_id]
             else:
                 self.logger().debug(f"Order is not/no longer being tracked ({order_update})")
- 
+        return updated
 
     async def _execute_amend_order(self,
             order_id: str,
@@ -1023,11 +1061,21 @@ class KrakenV2Exchange(ExchangePyBase):
             
             if order_msg["exec_type"] == "amended":
                 if order_msg["amended"]:
+
+                    # tracked_order.amount = Decimal(str(order_msg["order_qty"]))
+                    # tracked_order.price = Decimal(str(order_msg["limit_price"]))
+                    
+                    amend_order_update = self._create_order_update_with_price_and_amount(price=Decimal(str(order_msg["limit_price"])), amount=Decimal(str(order_msg["order_qty"])), order=tracked_order)
+
+                    self.sync_mode_process_in_flight_order_update(amend_order_update)
+                    
+                    original_datetime_str = str(order_msg['timestamp'])
+
                     order_side = 'BUY' if tracked_order.trade_type == TradeType.BUY else 'SELL'
-                    message = f"Amended {order_side} order {client_order_id}. Price: from {tracked_order.price} to {str(order_msg['limit_price'])}, Amount: from {tracked_order.amount} to {str(order_msg['order_qty'])}. Ratecount: {order_msg.get('ratecount')}"
-                    tracked_order.amount = Decimal(str(order_msg["order_qty"]))
-                    tracked_order.price = Decimal(str(order_msg["limit_price"]))
-                    self.logger().info(f"{message}")
+                    
+                    message = f"Amended {order_side} order {client_order_id}. Price: {str(order_msg['limit_price'])}, Amount: {str(order_msg['order_qty'])}, Amend Timestamp: {original_datetime_str}, Ratecount: {order_msg.get('ratecount')}."
+
+                    self.logger().info(f"{message} ")
                     # self.logger().info(f"Updated tracked order price: {self._order_tracker._in_flight_orders[client_order_id].price}")
 
             if "order_status" in order_msg and order_msg["exec_type"] != "amended":
